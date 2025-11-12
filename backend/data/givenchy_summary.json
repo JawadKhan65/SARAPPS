@@ -1,0 +1,10 @@
+{
+  "total_products_found": 20,
+  "total_products_scraped": 14,
+  "failed_products": 6,
+  "success_rate": "70.0%",
+  "products_with_image": 14,
+  "image_rate": "100.0%",
+  "execution_time_seconds": 212.171389,
+  "scraped_at": "2025-11-11T16:49:07.775898+00:00"
+}

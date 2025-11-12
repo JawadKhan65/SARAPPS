@@ -1,0 +1,9 @@
+opencv-python
+numpy
+pandas
+scikit-image
+scikit-learn
+torch
+streamlit
+playwright
+transformers

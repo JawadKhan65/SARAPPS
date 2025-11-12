@@ -1,0 +1,66 @@
+[
+	{
+		"id": 1,
+		"source_url": "https://www.gearpoint.nl/en/xa-forces-mid-en-earth-brown-2023.html?_gl=1*yako3p*_up*MQ..&gclid=CjwKCAiAwqHIBhAEEiwAx9cTeWQiYUeDZCOMcwmZn08467JQ28SR2EJxM2j3HWfhMhq36KDXUr_3NxoC1DoQAvD_BwE&gbraid=0AAAAADwsGfS5irzvuVTtaeMP3sr18bmEw",
+		"data_url": "data/images/train/xa-forces-mid-en-earth-brown-2023.webp",
+		"brand": "Salomon",
+		"name": "XA Forces MID EN Earth Brown",
+		"year": 2023
+	},
+	{
+		"id": 2,
+		"source_url": "https://www.bergfreunde.nl/tropicfeel-dune-vrijetijdsschoenen/?cnid=8a142ee2ed9013cae59b68176657fdda#galleryid-1.pictureid-9",
+		"data_url": "data/images/train/tropicfeel-dune-vrijetijdsschoenen-detail-9.jpg",
+		"brand": "Tropicfeel",
+		"name": "Dune Vrijetijdsschoenen",
+		"year": null
+	},
+	{
+		"id": 3,
+		"source_url": "https://www.gearpoint.nl/en/x-ultra-forces-mid-gtx-black.html?_gl=1*zctohk*_up*MQ..&gclid=CjwKCAiAwqHIBhAEEiwAx9cTeWQiYUeDZCOMcwmZn08467JQ28SR2EJxM2j3HWfhMhq36KDXUr_3NxoC1DoQAvD_BwE&gbraid=0AAAAADwsGfS5irzvuVTtaeMP3sr18bmEw",
+		"data_url": "data/images/train/salomon-forces-x-ultra-forces-mid-gtx-black.jpg",
+		"brand": "Salomon",
+		"name": "X-Ultra Forces MID GTX Black",
+		"year": null
+	},
+	{
+		"id": 4,
+		"source_url": "https://www.bergfreunde.nl/salewa-wildfire-edge-gtx-approachschoenen",
+		"data_url": "data/images/train/salewa-wildfire-edge-gtx-approachschoenen-detail-9.jpg",
+		"brand": "Salewa",
+		"name": "Wildfire Edge GTX Approachschoenen",
+		"year": null
+	},
+	{
+		"id": 5,
+		"source_url": "https://www.gearpoint.nl/en/salomon-quest-4d-gtx-forces-2-black-en-uk.html?id=228705689&_gl=1*4qb6og*_up*MQ..*_gs*MQ..&gclid=CjwKCAiAwqHIBhAEEiwAx9cTeWQiYUeDZCOMcwmZn08467JQ28SR2EJxM2j3HWfhMhq36KDXUr_3NxoC1DoQAvD_BwE&gbraid=0AAAAADwsGfS5irzvuVTtaeMP3sr18bmEw",
+		"data_url": "data/images/train/salomon-forces-quest-4d-gtx-forces-2-black-en.jpg",
+		"brand": "Salomon",
+		"name": "Quest 4D GTX Forces 2 Black EN",
+		"year": null
+	},
+	{
+		"id": 6,
+		"source_url": "https://en.zalando.de/nike-sportswear-air-vapormax-2023-trainers-pure-platinumwhite-ni112o0ty-a11.html",
+		"data_url": "data/images/train/nike-sportswear-air-vapormax-2023-trainers-pure-platinumwhite-ni112o0ty-a11.webp",
+		"brand": "Nike Sportswear",
+		"name": "AIR VAPORMAX 2023 FLYKNIT - Trainers",
+		"year": 2023
+	},
+	{
+		"id": 7,
+		"source_url": "https://www.gearpoint.nl/en/selvatica-tactical-mid-gtx-black.html?_gl=1*16iyjr0*_up*MQ..&gclid=CjwKCAiAwqHIBhAEEiwAx9cTeWQiYUeDZCOMcwmZn08467JQ28SR2EJxM2j3HWfhMhq36KDXUr_3NxoC1DoQAvD_BwE&gbraid=0AAAAADwsGfS5irzvuVTtaeMP3sr18bmEw",
+		"data_url": "data/images/train/aku-tactical-selvatica-tactical-mid-gtx-black.png",
+		"brand": "AKU Tactical",
+		"name": "Selvatica Tactical Mid GTX Black",
+		"year": null
+	},
+	{
+		"id": 8,
+		"source_url": "https://en.zalando.de/nike-sportswear-trainers-black-zir0305bn-001.html",
+		"data_url": "data/images/train/nike-sportswear-trainers-black-zir0305bn-001.webp",
+		"brand": "Nike Sportswear",
+		"name": "Pre-owned AIR MAX 2013 - Trainers - black",
+		"year": 2013
+	}
+]
