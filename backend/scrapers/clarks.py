@@ -33,9 +33,8 @@ import numpy as np
 
 # Add backend to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
-# Import CLIP model
-from models.clip_model import SoleDetectorCLIP
+from ml_models.clip_model import SoleDetectorCLIP
+from scrapers.base_scraper_mixin import BatchProcessingMixin
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -63,13 +62,65 @@ PRODUCT_NAME_SELECTOR = '[data-testid="productName"]'
 PRODUCT_MEDIA_CONTAINER_SELECTOR = '[data-testid="productMediaContainer"]'
 
 
-class ClarksScraperr:
+class ClarksScraper(BatchProcessingMixin):
     """Scraper for Clarks men's boots"""
 
     def __init__(self):
+        self.products = []  # Store scraped products
+        self.failed_urls = []
         logger.info("Initializing CLIP sole detector model...")
         self.sole_detector = SoleDetectorCLIP()
         logger.info("✓ CLIP model loaded")
+
+    async def navigate_with_retries(
+        self, page: Page, url: str, *, max_retries: int = MAX_RETRIES
+    ) -> Page:
+        """Navigate to a URL with retry and backoff, returning the (possibly new) page.
+
+        Uses stricter wait on first try, then relaxes to domcontentloaded.
+        Retries on common transient network errors.
+        """
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                if page.is_closed():
+                    try:
+                        ctx = page.context  # type: ignore[attr-defined]
+                        page = await ctx.new_page()
+                        logger.warning("Page was closed; created a new page for retry")
+                    except Exception:
+                        pass
+
+                wait_state = "networkidle" if attempt == 1 else "domcontentloaded"
+                timeout = NAVIGATION_TIMEOUT + (attempt - 1) * 10000
+                logger.debug(
+                    f"Navigating to {url} (attempt {attempt}/{max_retries}, wait_until={wait_state})"
+                )
+                await page.goto(url, wait_until=wait_state, timeout=timeout)
+                return page
+            except Exception as e:
+                msg = str(e)
+                last_exc = e
+                transient_markers = [
+                    "ERR_ADDRESS_UNREACHABLE",
+                    "ERR_NETWORK_CHANGED",
+                    "ERR_CONNECTION_RESET",
+                    "ERR_NAME_NOT_RESOLVED",
+                    "ETIMEDOUT",
+                    "ERR_TIMED_OUT",
+                ]
+                if any(m in msg for m in transient_markers) and attempt < max_retries:
+                    delay = RETRY_DELAY * attempt
+                    logger.warning(
+                        f"Navigation error: {msg}. Retrying in {delay}s ({attempt}/{max_retries})"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                break
+
+        if last_exc:
+            raise last_exc
+        return page
 
     async def close_modal_overlays(self, page: Page) -> None:
         """
@@ -384,7 +435,7 @@ class ClarksScraperr:
 
             # Navigate to product page
             logger.debug("⏳ Navigating to product page...")
-            await page.goto(url, wait_until="networkidle", timeout=NAVIGATION_TIMEOUT)
+            page = await self.navigate_with_retries(page, url)
             await asyncio.sleep(2)
 
             # Handle cookie consent
@@ -777,17 +828,27 @@ class ClarksScraperr:
             logger.error(f"Failed to extract details from {url}: {e}", exc_info=True)
             return None
 
-    async def scrape(self) -> Dict[str, Any]:
+    async def scrape(
+        self, batch_callback=None, batch_size: int = 20, is_cancelled=None
+    ) -> Dict[str, Any]:
         """
-        Main scraper function.
+        Main scraper function with batch processing support.
+
+        Args:
+            batch_callback: Async function to call with each batch of products
+            batch_size: Number of products to collect before calling batch_callback
+            is_cancelled: Optional function to check if scraping should be cancelled
 
         Steps:
         1. Navigate to base URL
         2. Load all products via Load More button
         3. Extract product links
-        4. For each link, extract product details and sole image
+        4. For each link, extract product details and sole image (with real-time batching)
         5. Save results to JSON
         """
+        if is_cancelled:
+            logger.info("🛑 Cancellation support enabled for this scraper")
+
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=False)
             context = await browser.new_context(user_agent=USER_AGENT)
@@ -796,12 +857,12 @@ class ClarksScraperr:
             try:
                 logger.info("Starting Clarks scraper")
                 logger.info(f"Base URL: {BASE_URL}")
+                if batch_callback:
+                    logger.info("Using in-memory image processing (no temp files)")
 
                 # Step 1: Navigate to base URL
                 logger.info("Step 1: Navigating to base URL...")
-                await page.goto(
-                    BASE_URL, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT
-                )
+                page = await self.navigate_with_retries(page, BASE_URL)
                 await asyncio.sleep(2)
 
                 # Step 1.5: Handle cookie consent
@@ -844,26 +905,96 @@ class ClarksScraperr:
 
                 logger.info(f"✓ Found {len(product_links)} products")
 
-                # Step 4: Scrape product details
+                # Step 4: Scrape product details with batch processing
                 logger.info("Step 4: Scraping product details...")
                 products = []
                 skipped = 0
                 errors = 0
+                current_batch = []
+                should_stop = False
 
                 for idx, product_url in enumerate(product_links, 1):
+                    # Check for cancellation
+                    if is_cancelled and is_cancelled():
+                        logger.warning(
+                            "🛑 Cancellation detected - stopping scraper immediately"
+                        )
+                        should_stop = True
+                        break
+
+                    if should_stop:
+                        logger.info("Stopping scraper early due to low uniqueness")
+                        break
+
+                    # Check if page is still open
+                    if page.is_closed():
+                        logger.warning("Page has been closed, stopping scraper")
+                        should_stop = True
+                        break
+
                     try:
                         product_data = await self.extract_product_details(
                             page, product_url, idx, len(product_links)
                         )
 
                         if product_data:
+                            # Log scraped product details
+                            logger.info(f"✅ Scraped Product #{idx}:")
+                            logger.info(f"   Brand: {product_data.get('brand', 'N/A')}")
+                            logger.info(
+                                f"   Product Name: {product_data.get('name', 'N/A')}"
+                            )
+                            logger.info(
+                                f"   Product URL: {product_data.get('source_url', 'N/A')}"
+                            )
+                            logger.info(
+                                f"   Sole Image URL: {product_data.get('image_url', 'N/A')[:80] if product_data.get('image_url') else 'N/A'}..."
+                            )
+                            logger.info(
+                                f"   Sole Confidence: {product_data.get('sole_confidence', 0):.3f}"
+                            )
+
                             products.append(product_data)
+                            self.products.append(product_data)
+                            current_batch.append(product_data)
+
+                            # Process batch when size is reached
+                            if len(current_batch) >= batch_size and batch_callback:
+                                should_continue = (
+                                    await self._process_batch_with_callback(
+                                        current_batch,
+                                        batch_callback,
+                                        brand_field="brand",
+                                        name_field="name",
+                                        url_field="source_url",
+                                        image_url_field="image_url",
+                                    )
+                                )
+
+                                if not should_continue:
+                                    should_stop = True
+
+                                current_batch = []  # Reset batch
                         else:
                             skipped += 1
 
                     except Exception as e:
                         logger.error(f"❌ Error scraping product {idx}: {e}")
                         errors += 1
+
+                # Process remaining items in final batch
+                if current_batch and batch_callback and not should_stop:
+                    logger.info(
+                        f"Processing final batch of {len(current_batch)} products..."
+                    )
+                    await self._process_batch_with_callback(
+                        current_batch,
+                        batch_callback,
+                        brand_field="brand",
+                        name_field="name",
+                        url_field="source_url",
+                        image_url_field="image_url",
+                    )
 
                 # Build result
                 result = {
@@ -896,7 +1027,7 @@ class ClarksScraperr:
 
 async def main():
     """Main entry point"""
-    scraper = ClarksScraperr()
+    scraper = ClarksScraper()
     result = await scraper.scrape()
 
     # Save results to JSON

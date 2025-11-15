@@ -1,0 +1,125 @@
+from flask import Flask
+from flask_cors import CORS
+from config import config
+from extensions import db, jwt, mail, setup_logging
+from models import (
+    User,
+    AdminUser,
+    SoleImage,
+    UploadedImage,
+    MatchResult,
+    Crawler,
+    CrawlerStatistics,
+    SystemConfig,
+)
+import os
+from datetime import datetime
+
+
+def create_app(config_name=None):
+    """Application factory"""
+    if config_name is None:
+        config_name = os.getenv("FLASK_ENV", "development")
+
+    app = Flask(__name__)
+    app.config.from_object(config[config_name])
+
+    # Initialize extensions
+    db.init_app(app)
+    jwt.init_app(app)
+    mail.init_app(app)
+
+    # CORS setup
+    CORS(app, origins=app.config["CORS_ORIGINS"])
+
+    # Logging setup
+    setup_logging(app)
+
+    # Initialize crawler scheduler
+    from services.crawler_scheduler import get_scheduler
+
+    scheduler = get_scheduler()
+    scheduler.load_active_crawlers()
+    app.logger.info("✅ Crawler scheduler initialized and loaded active crawlers")
+
+    # Create upload directories
+    os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+    os.makedirs(os.path.join(app.config["UPLOAD_FOLDER"], "originals"), exist_ok=True)
+    os.makedirs(os.path.join(app.config["UPLOAD_FOLDER"], "processed"), exist_ok=True)
+
+    # Database context
+    with app.app_context():
+        try:
+            db.create_all()
+
+            # Initialize system config if not exists
+            if SystemConfig.query.first() is None:
+                default_config = SystemConfig()
+                db.session.add(default_config)
+                db.session.commit()
+        except Exception as e:
+            app.logger.warning(f"Database initialization failed: {e}")
+            app.logger.warning(
+                "Continuing without database. Run 'python scripts/init_db.py' to initialize."
+            )
+
+    # Register blueprints
+    from routes.auth import auth_bp
+    from routes.user import user_bp
+    from routes.matches import matches_bp
+    from routes.admin import admin_bp
+    from routes.crawlers import crawlers_bp
+    from routes.database import database_bp
+    from routes.images import images_bp
+
+    app.register_blueprint(auth_bp, url_prefix="/api/auth")
+    app.register_blueprint(user_bp, url_prefix="/api/user")
+    app.register_blueprint(matches_bp, url_prefix="/api/matches")
+    app.register_blueprint(admin_bp, url_prefix="/api/admin")
+    app.register_blueprint(crawlers_bp, url_prefix="/api/crawlers")
+    app.register_blueprint(database_bp, url_prefix="/api/database")
+    app.register_blueprint(
+        images_bp
+    )  # Uses /api/images prefix from blueprint definition
+
+    # Error handlers
+    @app.errorhandler(404)
+    def not_found(e):
+        return {"error": "Not found"}, 404
+
+    @app.errorhandler(500)
+    def internal_error(e):
+        app.logger.error(f"Internal server error: {e}")
+        return {"error": "Internal server error"}, 500
+
+    @app.shell_context_processor
+    def make_shell_context():
+        return {
+            "db": db,
+            "User": User,
+            "AdminUser": AdminUser,
+            "SoleImage": SoleImage,
+            "UploadedImage": UploadedImage,
+            "MatchResult": MatchResult,
+            "Crawler": Crawler,
+        }
+
+    return app
+
+
+if __name__ == "__main__":
+    import os
+
+    app = create_app()
+
+    # Use Waitress production server instead of Flask development server
+    if os.getenv("FLASK_ENV") == "development":
+        # Development mode - use Flask's built-in server with debug
+        app.run(debug=True, host="0.0.0.0", port=5000, use_reloader=False)
+    else:
+        # Production mode - use Waitress
+        from waitress import serve
+
+        print("Starting production server with Waitress...")
+        print(" * Running on http://0.0.0.0:5000")
+        serve(app, host="0.0.0.0", port=5000, threads=6)

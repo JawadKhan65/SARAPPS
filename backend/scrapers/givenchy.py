@@ -33,9 +33,8 @@ import numpy as np
 
 # Add backend to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
-# Import CLIP model
-from models.clip_model import SoleDetectorCLIP
+from ml_models.clip_model import SoleDetectorCLIP
+from scrapers.base_scraper_mixin import BatchProcessingMixin
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -63,7 +62,7 @@ PRODUCT_IMAGE_SELECTOR = "li"
 BRAND_NAME = "Givenchy"
 
 
-class GivenchyScraperr:
+class GivenchyScraper(BatchProcessingMixin):
     """Givenchy men's shoes scraper with infinite scroll support."""
 
     def __init__(self, base_url: str = BASE_URL):
@@ -496,9 +495,16 @@ class GivenchyScraperr:
             logger.error(f"Failed to extract details from {url}: {e}", exc_info=True)
             return None
 
-    async def scrape_all_products(self):
+    async def scrape(
+        self, batch_callback=None, batch_size: int = 20, is_cancelled=None
+    ):
         """
-        Main scraping function.
+        Main scraping function with batch processing support.
+
+        Args:
+            batch_callback: Async function to call with each batch of products
+            batch_size: Number of products to collect before calling batch_callback
+            is_cancelled: Optional function to check if scraping should be cancelled
 
         Process:
         1. Navigate to base URL
@@ -507,8 +513,13 @@ class GivenchyScraperr:
         4. Scrape each product detail
         5. Save results
         """
+        if is_cancelled:
+            logger.info("🛑 Cancellation support enabled for this scraper")
+
         logger.info("Starting Givenchy scraper")
         logger.info(f"Base URL: {self.base_url}")
+        if batch_callback:
+            logger.info("Using in-memory image processing (no temp files)")
         self.start_time = datetime.now()
 
         async with async_playwright() as p:
@@ -555,9 +566,30 @@ class GivenchyScraperr:
                 self.total_products_found = len(self.product_links)
                 logger.info(f"✓ Found {self.total_products_found} product links")
 
-                # Step 4: Scrape each product
+                # Step 4: Scrape each product with batch processing
                 logger.info("Step 4: Scraping product details...")
+                current_batch = []
+                should_stop = False
+
                 for idx, product_url in enumerate(self.product_links, 1):
+                    # Check for cancellation
+                    if is_cancelled and is_cancelled():
+                        logger.warning(
+                            "🛑 Cancellation detected - stopping scraper immediately"
+                        )
+                        should_stop = True
+                        break
+
+                    if should_stop:
+                        logger.info("Stopping scraper early due to low uniqueness")
+                        break
+
+                    # Check if page is still open
+                    if page.is_closed():
+                        logger.warning("Page has been closed, stopping scraper")
+                        should_stop = True
+                        break
+
                     logger.info(
                         f"\n  Product {idx}/{self.total_products_found}: Scraping..."
                     )
@@ -567,8 +599,40 @@ class GivenchyScraperr:
                         )
 
                         if details and details.get("image_url"):
+                            # Log scraped product details
+                            logger.info(f"✅ Scraped Product #{idx}:")
+                            logger.info(f"   Brand: {details.get('brand', 'N/A')}")
+                            logger.info(
+                                f"   Product Name: {details.get('name', 'N/A')}"
+                            )
+                            logger.info(
+                                f"   Product URL: {details.get('source_url', 'N/A')}"
+                            )
+                            logger.info(
+                                f"   Sole Image URL: {details.get('image_url', 'N/A')[:80] if details.get('image_url') else 'N/A'}..."
+                            )
+
                             self.products.append(details)
-                            logger.info(f"  ✓ {details['brand']} - {details['name']}")
+                            current_batch.append(details)
+
+                            # Process batch when size is reached
+                            if len(current_batch) >= batch_size and batch_callback:
+                                should_continue = (
+                                    await self._process_batch_with_callback(
+                                        current_batch,
+                                        batch_callback,
+                                        brand_field="brand",
+                                        name_field="name",
+                                        url_field="source_url",
+                                        image_url_field="image_url",
+                                    )
+                                )
+
+                                if not should_continue:
+                                    should_stop = True
+
+                                current_batch = []  # Reset batch
+
                         elif details:
                             # Product exists but no image (skipped due to insufficient images)
                             logger.warning(
@@ -584,6 +648,20 @@ class GivenchyScraperr:
                         self.failed_urls.append(product_url)
 
                     await asyncio.sleep(2)  # Delay between products
+
+                # Process remaining items in final batch
+                if current_batch and batch_callback and not should_stop:
+                    logger.info(
+                        f"Processing final batch of {len(current_batch)} products..."
+                    )
+                    await self._process_batch_with_callback(
+                        current_batch,
+                        batch_callback,
+                        brand_field="brand",
+                        name_field="name",
+                        url_field="source_url",
+                        image_url_field="image_url",
+                    )
 
                 logger.info(
                     f"\n✓ Scraping complete. Total products: {len(self.products)}"
@@ -686,11 +764,11 @@ class GivenchyScraperr:
 
 async def main():
     """Main entry point."""
-    scraper = GivenchyScraperr(base_url=BASE_URL)
+    scraper = GivenchyScraper(base_url=BASE_URL)
 
     try:
         # Scrape all products
-        await scraper.scrape_all_products()
+        await scraper.scrape()
 
         # Save results
         scraper.save_results()

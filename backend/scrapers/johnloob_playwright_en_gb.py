@@ -291,10 +291,69 @@ class JohnLobbScraper:
             logger.error(f"Failed to extract details from {url}: {e}")
             return None
 
-    async def scrape(self, max_products: Optional[int] = None):
-        """Main scraping function."""
+    def _download_image_to_memory(self, image_url: str) -> Optional[bytes]:
+        """Download image directly to memory as bytes - no disk I/O"""
+        import requests
+
+        try:
+            response = requests.get(
+                image_url, timeout=10, headers={"User-Agent": USER_AGENT}
+            )
+            response.raise_for_status()
+            logger.debug(f"Downloaded image to memory: {len(response.content)} bytes")
+            return response.content
+        except Exception as e:
+            logger.error(f"Failed to download image {image_url}: {e}")
+            return None
+
+    def _prepare_batch_for_processing(self, batch: List[Dict]) -> List[Dict]:
+        """Download images to memory and prepare batch for processing"""
+        processed_batch = []
+
+        for product in batch:
+            # Download image to memory if available
+            image_bytes = None
+            if product.get("last_image_url"):
+                image_bytes = self._download_image_to_memory(product["last_image_url"])
+
+            if image_bytes:
+                # Convert to format expected by scraper_service
+                # Pass image_bytes instead of image_path for in-memory processing
+                processed_product = {
+                    "url": product["url"],
+                    "brand": product["brand"],
+                    "product_name": product["name"],
+                    "product_type": "shoe",  # Default for John Lobb
+                    "image_bytes": image_bytes,  # In-memory image data
+                    "image_url": product["last_image_url"],  # Keep URL for reference
+                }
+                processed_batch.append(processed_product)
+            else:
+                logger.warning(f"Skipping product without image: {product['url']}")
+
+        return processed_batch
+
+    async def scrape(
+        self,
+        max_products: Optional[int] = None,
+        batch_callback=None,
+        batch_size: int = 20,
+        is_cancelled=None,
+    ):
+        """Main scraping function with real-time batch processing.
+
+        Args:
+            max_products: Maximum number of products to scrape
+            batch_callback: Async function to call with each batch of products
+            batch_size: Number of products to collect before calling batch_callback
+            is_cancelled: Optional function to check if scraping should be cancelled
+        """
+        if is_cancelled:
+            logger.info("🛑 Cancellation support enabled for this scraper")
+
         logger.info(f"Starting John Lobb scraper for {self.base_url}")
         self.start_time = datetime.now()
+        logger.info("Using in-memory image processing (no temp files)")
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=False)
@@ -342,20 +401,106 @@ class JohnLobbScraper:
                     else self.product_links
                 )
 
-                # Step 2: Scrape each product
+                # Step 2: Scrape each product with batch processing
                 logger.info(f"\nStep 2: Scraping {len(urls_to_scrape)} products...")
+                current_batch = []
+                should_stop = False
+
                 for idx, product_url in enumerate(urls_to_scrape, 1):
+                    # Check for cancellation
+                    if is_cancelled and is_cancelled():
+                        logger.warning(
+                            "🛑 Cancellation detected - stopping scraper immediately"
+                        )
+                        should_stop = True
+                        break
+
+                    if should_stop:
+                        logger.info("Stopping scraper early due to low uniqueness")
+                        break
+
+                    # Check if page is still open
+                    if page.is_closed():
+                        logger.warning("Page has been closed, stopping scraper")
+                        should_stop = True
+                        break
+
                     logger.info(f"\n[{idx}/{len(urls_to_scrape)}] Scraping product...")
                     details = await self.extract_product_details(page, product_url)
 
                     if details:
+                        # Log scraped product details
+                        logger.info(f"✅ Scraped Product #{idx}:")
+                        logger.info(f"   Brand: {details.get('brand', 'N/A')}")
+                        logger.info(f"   Product Name: {details.get('name', 'N/A')}")
+                        logger.info(
+                            f"   Product URL: {details.get('source_url', 'N/A')}"
+                        )
+                        logger.info(
+                            f"   Sole Image URL: {details.get('image_url', 'N/A')[:80] if details.get('image_url') else 'N/A'}..."
+                        )
+
                         self.products.append(details)
-                        logger.info(f"✓ {details['brand']} - {details['name']}")
+                        current_batch.append(details)
+
+                        # Check for cancellation before processing batch
+                        if is_cancelled and is_cancelled():
+                            logger.warning(
+                                "🛑 Cancellation detected - stopping scraper immediately"
+                            )
+                            should_stop = True
+                            break
+
+                        # Process batch when size is reached
+                        if len(current_batch) >= batch_size and batch_callback:
+                            logger.info(
+                                f"Preparing batch of {len(current_batch)} products for processing..."
+                            )
+
+                            # Download images to memory and prepare batch
+                            processed_batch = self._prepare_batch_for_processing(
+                                current_batch
+                            )
+
+                            if processed_batch:
+                                logger.info(
+                                    f"Processing {len(processed_batch)} products with images..."
+                                )
+                                should_continue = await batch_callback(processed_batch)
+
+                                if not should_continue:
+                                    logger.warning(
+                                        "Batch callback returned False, stopping scraper"
+                                    )
+                                    should_stop = True
+                            else:
+                                logger.warning(
+                                    "No products with images in this batch, continuing..."
+                                )
+
+                            current_batch = []  # Reset batch
                     else:
                         self.failed_urls.append(product_url)
                         logger.error(f"✗ Failed to scrape {product_url}")
 
                     await asyncio.sleep(1)  # Delay between requests
+
+                # Process remaining items in final batch
+                if current_batch and batch_callback and not should_stop:
+                    # Check for cancellation before processing final batch
+                    if is_cancelled and is_cancelled():
+                        logger.warning(
+                            "🛑 Cancellation detected - skipping final batch"
+                        )
+                    else:
+                        logger.info(
+                            f"Processing final batch of {len(current_batch)} products..."
+                        )
+                        processed_batch = self._prepare_batch_for_processing(
+                            current_batch
+                        )
+                        if processed_batch:
+                            await batch_callback(processed_batch)
 
             except Exception as e:
                 logger.error(f"Scraping failed: {e}", exc_info=True)

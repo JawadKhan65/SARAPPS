@@ -26,6 +26,7 @@ import sys
 
 # Add backend to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from scrapers.base_scraper_mixin import BatchProcessingMixin
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -58,7 +59,7 @@ PRODUCT_IMAGE_SELECTOR = "img"
 BRAND_NAME = "Crockett & Jones"
 
 
-class CrocettJonesScraper:
+class CrockettJonesScraper(BatchProcessingMixin):
     """Crockett & Jones shoes scraper with pagination support."""
 
     def __init__(
@@ -342,9 +343,21 @@ class CrocettJonesScraper:
             logger.error(f"Failed to extract details from {url}: {e}", exc_info=True)
             return None
 
-    async def scrape_all_pages(self, max_pages: Optional[int] = None):
+    async def scrape(
+        self,
+        max_pages: Optional[int] = None,
+        batch_callback=None,
+        batch_size: int = 20,
+        is_cancelled=None,
+    ):
         """
-        Main scraping function.
+        Main scraping function with batch processing support.
+
+        Args:
+            max_pages: Maximum number of pages to scrape
+            batch_callback: Async function to call with each batch of products
+            batch_size: Number of products to collect before calling batch_callback
+            is_cancelled: Optional function to check if scraping should be cancelled
 
         Process:
         1. Navigate to base URL
@@ -352,10 +365,15 @@ class CrocettJonesScraper:
         3. For each page:
            a. Navigate to page URL
            b. Extract product links
-           c. Scrape each product
+           c. Scrape each product (with real-time batch processing)
         """
+        if is_cancelled:
+            logger.info("🛑 Cancellation support enabled for this scraper")
+
         logger.info("Starting Crockett & Jones scraper")
         logger.info(f"Base URL: {self.base_url}")
+        if batch_callback:
+            logger.info("Using in-memory image processing (no temp files)")
         self.start_time = datetime.now()
 
         async with async_playwright() as p:
@@ -402,9 +420,16 @@ class CrocettJonesScraper:
                 )
                 logger.info(f"Will scrape {pages_to_scrape} pages")
 
-                # Step 3: Scrape each page
+                # Step 3: Scrape each page with batch processing
                 logger.info("Step 3: Scraping all pages...")
+                current_batch = []
+                should_stop = False
+
                 for page_num in range(1, pages_to_scrape + 1):
+                    if should_stop:
+                        logger.info("Stopping scraper early due to low uniqueness")
+                        break
+
                     logger.info(f"\n--- Page {page_num}/{pages_to_scrape} ---")
 
                     # Navigate to page
@@ -438,14 +463,63 @@ class CrocettJonesScraper:
                     page_links = await self.get_product_links_from_page(page)
                     self.product_links.extend(page_links)
 
-                    # Scrape each product
+                    # Scrape each product with batch processing
                     for idx, product_url in enumerate(page_links, 1):
+                        # Check for cancellation
+                        if is_cancelled and is_cancelled():
+                            logger.warning(
+                                "🛑 Cancellation detected - stopping scraper immediately"
+                            )
+                            should_stop = True
+                            break
+
+                        if should_stop:
+                            break
+
+                        # Check if page is still open
+                        if page.is_closed():
+                            logger.warning("Page has been closed, stopping scraper")
+                            should_stop = True
+                            break
+
                         logger.info(f"  Product {idx}/{len(page_links)}: Scraping...")
                         details = await self.extract_product_details(page, product_url)
 
                         if details:
+                            # Log scraped product details
+                            logger.info(f"✅ Scraped Product #{idx}:")
+                            logger.info(f"   Brand: {details.get('brand', 'N/A')}")
+                            logger.info(
+                                f"   Product Name: {details.get('name', 'N/A')}"
+                            )
+                            logger.info(
+                                f"   Product URL: {details.get('source_url', 'N/A')}"
+                            )
+                            logger.info(
+                                f"   Sole Image URL: {details.get('image_url', 'N/A')[:80] if details.get('image_url') else 'N/A'}..."
+                            )
+
                             self.products.append(details)
-                            logger.info(f"  ✓ {details['brand']} - {details['name']}")
+                            current_batch.append(details)
+
+                            # Process batch when size is reached
+                            if len(current_batch) >= batch_size and batch_callback:
+                                logger.info(
+                                    f"🔄 Processing batch of {len(current_batch)} products..."
+                                )
+                                should_continue = await self._process_batch_with_callback(
+                                    current_batch,
+                                    batch_callback,
+                                    brand_field="brand",
+                                    name_field="name",
+                                    url_field="source_url",  # FIXED: Changed from "url" to "source_url"
+                                    image_url_field="image_url",
+                                )
+
+                                if not should_continue:
+                                    should_stop = True
+
+                                current_batch = []  # Reset batch
                         else:
                             self.failed_urls.append(product_url)
                             logger.error(f"  ✗ Failed to scrape {product_url}")
@@ -455,6 +529,20 @@ class CrocettJonesScraper:
                     # Delay between pages
                     if page_num < pages_to_scrape:
                         await asyncio.sleep(2)
+
+                # Process remaining items in final batch
+                if current_batch and batch_callback and not should_stop:
+                    logger.info(
+                        f"🔄 Processing final batch of {len(current_batch)} products..."
+                    )
+                    await self._process_batch_with_callback(
+                        current_batch,
+                        batch_callback,
+                        brand_field="brand",
+                        name_field="name",
+                        url_field="source_url",  # FIXED: Changed from "url" to "source_url"
+                        image_url_field="image_url",
+                    )
 
                 logger.info(
                     f"\n✓ Scraping complete. Total products: {len(self.products)}"
@@ -557,7 +645,7 @@ async def main():
     try:
         # Scrape all pages
         # Set max_pages=2 for testing, None for all pages
-        await scraper.scrape_all_pages(max_pages=None)
+        await scraper.scrape(max_pages=None)
 
         # Save results
         scraper.save_results()

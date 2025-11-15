@@ -24,6 +24,7 @@ import sys
 
 # Add backend to path to import models
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from scrapers.base_scraper_mixin import BatchProcessingMixin
 
 
 logging.basicConfig(level=logging.INFO)
@@ -47,6 +48,254 @@ PRODUCT_NAME_XPATH = '//*[@id="main-content"]/div[1]/div/div[2]/h1/span/span'
 IMAGES_CONTAINER_XPATH = (
     '//*[@id="main-content"]/div[1]/div/div[1]/section/div[1]/div/div/div[2]/div[1]'
 )
+
+
+class ZalandoScraper(BatchProcessingMixin):
+    """
+    Zalando scraper wrapper class for integration with scraper manager.
+    Wraps the standalone scrape_zalando_shoes function.
+    """
+
+    def __init__(self, base_url: str = "https://www.zalando.nl/schoenen"):
+        # Ensure we always use the correct .nl shoes page, not just zalando.com
+        if base_url and "zalando.com" in base_url and "zalando.nl" not in base_url:
+            logger.warning(
+                f"Correcting base_url from {base_url} to https://www.zalando.nl/schoenen"
+            )
+            base_url = "https://www.zalando.nl/schoenen"
+        elif base_url and "zalando.nl" in base_url and "/schoenen" not in base_url:
+            # If it's zalando.nl but missing /schoenen, add it
+            base_url = "https://www.zalando.nl/schoenen"
+
+        self.base_url = base_url
+        logger.info(f"Zalando scraper initialized with base_url: {self.base_url}")
+
+    async def scrape(
+        self,
+        max_pages: int = None,
+        batch_callback=None,
+        batch_size: int = 20,
+        is_cancelled=None,
+    ):
+        """
+        Scrape Zalando shoes with real-time batch processing support.
+
+        Args:
+            max_pages: Maximum number of pages to scrape (None = all pages)
+            batch_callback: Async function to call with each batch of products
+            batch_size: Number of products to collect before calling batch_callback
+            is_cancelled: Optional function to check if scraping should be cancelled
+
+        Process:
+        1. Launch browser and navigate to Zalando search
+        2. Process each page sequentially
+        3. For each page: extract product links → scrape products → batch process
+        4. Check uniqueness and insert into DB via batch_callback
+        """
+        if is_cancelled:
+            logger.info("🛑 Cancellation support enabled for this scraper")
+
+        logger.info("Starting Zalando scraper with real-time batch processing")
+        logger.info(f"Base URL: {self.base_url}")
+
+        results = []
+        current_batch = []
+        should_stop = False
+        global_idx = 1
+
+        async with async_playwright() as p:
+            # Launch browser
+            browser = await p.chromium.launch(headless=False)
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+            page = await context.new_page()
+            page.set_default_timeout(DEFAULT_TIMEOUT)
+            page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
+
+            try:
+                # Navigate to base URL with retry logic
+                logger.info(f"Navigating to {self.base_url}")
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        await page.goto(
+                            self.base_url, wait_until="load", timeout=NAVIGATION_TIMEOUT
+                        )
+                        await page.wait_for_selector(
+                            "#main-content", timeout=DEFAULT_TIMEOUT
+                        )
+                        break
+                    except Exception as e:
+                        if attempt < MAX_RETRIES - 1:
+                            logger.warning(
+                                f"Navigation attempt {attempt + 1} failed: {e}. Retrying..."
+                            )
+                            await asyncio.sleep(RETRY_DELAY)
+                        else:
+                            logger.error(
+                                f"Failed to navigate after {MAX_RETRIES} attempts"
+                            )
+                            raise
+
+                # Get total pages
+                total_pages = await get_pagination_info(page)
+                pages_to_scrape = (
+                    min(total_pages, max_pages) if max_pages else total_pages
+                )
+
+                logger.info(f"🧭 Detected {total_pages} total pages")
+                logger.info(f"📄 Will scrape {pages_to_scrape} pages")
+
+                # Process each page sequentially
+                for page_num in range(1, pages_to_scrape + 1):
+                    if should_stop:
+                        break
+
+                    logger.info(f"\n📄 Loading page {page_num}/{pages_to_scrape}...")
+
+                    # Navigate to page with retry
+                    page_url = f"{self.base_url}?p={page_num}"
+                    for attempt in range(MAX_RETRIES):
+                        try:
+                            await page.goto(
+                                page_url, wait_until="load", timeout=NAVIGATION_TIMEOUT
+                            )
+                            await page.wait_for_selector(
+                                "#main-content", timeout=DEFAULT_TIMEOUT
+                            )
+                            break
+                        except Exception as e:
+                            if attempt < MAX_RETRIES - 1:
+                                logger.warning(
+                                    f"Page load attempt {attempt + 1} failed: {e}. Retrying..."
+                                )
+                                await asyncio.sleep(RETRY_DELAY)
+                            else:
+                                logger.error(f"Failed to load page {page_num}")
+                                break
+
+                    # Get product links from current page
+                    product_links = await get_product_links(page)
+                    logger.info(
+                        f"🔗 Page {page_num}: Found {len(product_links)} product links"
+                    )
+
+                    if not product_links:
+                        logger.warning(f"No product links found on page {page_num}")
+                        continue
+
+                    # Extract and process each product on this page
+                    for local_idx, product_url in enumerate(product_links, 1):
+                        # Check for cancellation
+                        if is_cancelled and is_cancelled():
+                            logger.warning(
+                                "🛑 Cancellation detected - stopping scraper immediately"
+                            )
+                            should_stop = True
+                            break
+
+                        if should_stop:
+                            break
+
+                        try:
+                            logger.info(
+                                f"\n  Product {global_idx} (Page {page_num}:{local_idx}/{len(product_links)}): Scraping..."
+                            )
+
+                            details = await extract_product_details(page, product_url)
+
+                            if details and details.get("sole_image_url"):
+                                # Normalize to expected format
+                                normalized_product = {
+                                    "brand": details.get("brand", "Unknown"),
+                                    "name": details.get("name", "Unknown"),
+                                    "url": details.get("source_url", ""),
+                                    "image_url": details.get("sole_image_url", ""),
+                                    "product_type": "shoe",
+                                }
+
+                                # Log scraped product
+                                logger.info(f"✅ Scraped Product #{global_idx}:")
+                                logger.info(f"   Brand: {normalized_product['brand']}")
+                                logger.info(
+                                    f"   Product Name: {normalized_product['name']}"
+                                )
+                                logger.info(
+                                    f"   Product URL: {normalized_product['url']}"
+                                )
+                                sole_url = normalized_product["image_url"]
+                                logger.info(
+                                    f"   Sole Image URL: {sole_url[:80] + '...' if len(sole_url) > 80 else sole_url}"
+                                )
+                                logger.info(
+                                    f"   Total Images Found: {details.get('image_count', 0)}"
+                                )
+
+                                results.append(normalized_product)
+                                current_batch.append(normalized_product)
+
+                                # Process batch when reaching batch_size
+                                if len(current_batch) >= batch_size and batch_callback:
+                                    logger.info(
+                                        f"Processing batch of {len(current_batch)} products..."
+                                    )
+                                    prepared_batch = self._prepare_batch_for_processing(
+                                        current_batch,
+                                        brand_field="brand",
+                                        name_field="name",
+                                        url_field="url",
+                                        image_url_field="image_url",
+                                    )
+
+                                    if prepared_batch:
+                                        should_continue = await batch_callback(
+                                            prepared_batch
+                                        )
+                                        if not should_continue:
+                                            logger.info(
+                                                "Batch callback returned False, stopping"
+                                            )
+                                            should_stop = True
+
+                                    current_batch = []
+
+                            global_idx += 1
+                            await asyncio.sleep(1)  # Small delay between requests
+
+                        except Exception as e:
+                            logger.error(
+                                f"[Page {page_num}:Product {global_idx}] Failed to extract {product_url}: {e}"
+                            )
+                            global_idx += 1
+                            continue
+
+                    # Pause between pages
+                    await asyncio.sleep(2)
+
+                # Process remaining items in final batch
+                if current_batch and batch_callback and not should_stop:
+                    logger.info(
+                        f"Processing final batch of {len(current_batch)} products..."
+                    )
+                    prepared_batch = self._prepare_batch_for_processing(
+                        current_batch,
+                        brand_field="brand",
+                        name_field="name",
+                        url_field="url",
+                        image_url_field="image_url",
+                    )
+
+                    if prepared_batch:
+                        await batch_callback(prepared_batch)
+
+                logger.info(f"✅ Scraped {len(results)} products with sole images")
+
+            except Exception as e:
+                logger.error(f"Scraper failed: {e}", exc_info=True)
+            finally:
+                await browser.close()
+
+        return results
 
 
 async def get_pagination_info(page: Page) -> int:

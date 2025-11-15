@@ -12,9 +12,10 @@ from pathlib import Path
 
 from playwright.async_api import async_playwright, Page
 
-# Add parent directory to path to import models
+# Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from models.clip_model import SoleDetectorCLIP
+from ml_models.clip_model import SoleDetectorCLIP
+from scrapers.base_scraper_mixin import BatchProcessingMixin
 
 # Configure logging
 logging.basicConfig(
@@ -32,9 +33,11 @@ SCROLL_PAUSE_TIME = 0.5
 IMAGE_LOAD_TIMEOUT = 5000
 
 
-class DecathlonScraper:
+class DecathlonScraper(BatchProcessingMixin):
     def __init__(self):
         """Initialize the scraper with CLIP model for sole detection."""
+        self.products = []
+        self.failed_urls = []
         logger.info("Initializing CLIP sole detector model...")
         self.clip_model = SoleDetectorCLIP()
         logger.info("✓ CLIP model loaded")
@@ -382,6 +385,7 @@ class DecathlonScraper:
                 return None
 
             return {
+                "brand": "Decathlon",
                 "product_name": product_name,
                 "product_url": url,
                 "image_url": selected_image,
@@ -393,10 +397,23 @@ class DecathlonScraper:
             logger.error(f"❌ Failed to extract details from {url}: {e}", exc_info=True)
             return None
 
-    async def scrape(self) -> Dict[str, Any]:
-        """Main scraping method."""
+    async def scrape(
+        self, batch_callback=None, batch_size: int = 20, is_cancelled=None
+    ) -> Dict[str, Any]:
+        """Main scraping method with batch processing support.
+
+        Args:
+            batch_callback: Async function to call with each batch of products
+            batch_size: Number of products to collect before calling batch_callback
+            is_cancelled: Optional function to check if scraping should be cancelled
+        """
+        if is_cancelled:
+            logger.info("🛑 Cancellation support enabled for this scraper")
+
         logger.info("Starting Decathlon scraper")
         logger.info(f"Base URL: {BASE_URL}")
+        if batch_callback:
+            logger.info("Using in-memory image processing (no temp files)")
 
         async with async_playwright() as p:
             logger.info("Step 0: Launching browser...")
@@ -468,21 +485,93 @@ class DecathlonScraper:
 
                 logger.info(f"✓ Found {len(product_links)} products")
 
-                # Scrape each product
+                # Scrape each product with batch processing
                 logger.info("Step 3: Scraping product details...")
                 products = []
+                current_batch = []
+                should_stop = False
+
                 for idx, product_url in enumerate(product_links, 1):
+                    # Check for cancellation
+                    if is_cancelled and is_cancelled():
+                        logger.warning(
+                            "🛑 Cancellation detected - stopping scraper immediately"
+                        )
+                        should_stop = True
+                        break
+
+                    if should_stop:
+                        logger.info("Stopping scraper early due to low uniqueness")
+                        break
+
+                    # Check if page is still open
+                    if page.is_closed():
+                        logger.warning("Page has been closed, stopping scraper")
+                        should_stop = True
+                        break
+
                     try:
                         product_data = await self.extract_product_details(
                             page, product_url, idx, len(product_links)
                         )
                         if product_data:
+                            # Log scraped product details
+                            logger.info(f"✅ Scraped Product #{idx}:")
+                            logger.info(f"   Brand: {product_data.get('brand', 'N/A')}")
+                            logger.info(
+                                f"   Product Name: {product_data.get('product_name', 'N/A')}"
+                            )
+                            logger.info(
+                                f"   Product URL: {product_data.get('product_url', 'N/A')}"
+                            )
+                            logger.info(
+                                f"   Sole Image URL: {product_data.get('image_url', 'N/A')[:80] if product_data.get('image_url') else 'N/A'}..."
+                            )
+                            logger.info(
+                                f"   Sole Confidence: {product_data.get('sole_confidence', 0):.3f}"
+                            )
+
                             products.append(product_data)
+                            self.products.append(product_data)
+                            current_batch.append(product_data)
+
+                            # Process batch when size is reached
+                            if len(current_batch) >= batch_size and batch_callback:
+                                should_continue = (
+                                    await self._process_batch_with_callback(
+                                        current_batch,
+                                        batch_callback,
+                                        brand_field="brand",
+                                        name_field="product_name",
+                                        url_field="product_url",
+                                        image_url_field="image_url",
+                                    )
+                                )
+
+                                if not should_continue:
+                                    should_stop = True
+
+                                current_batch = []  # Reset batch
+
                         logger.info("")
                     except Exception as e:
                         logger.error(
                             f"Error scraping product {idx}: {e}", exc_info=True
                         )
+
+                # Process remaining items in final batch
+                if current_batch and batch_callback and not should_stop:
+                    logger.info(
+                        f"Processing final batch of {len(current_batch)} products..."
+                    )
+                    await self._process_batch_with_callback(
+                        current_batch,
+                        batch_callback,
+                        brand_field="brand",
+                        name_field="product_name",
+                        url_field="product_url",
+                        image_url_field="image_url",
+                    )
 
                 logger.info(f"\n{'=' * 60}")
                 logger.info(

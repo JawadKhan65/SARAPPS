@@ -15,9 +15,10 @@ from io import BytesIO
 
 from playwright.async_api import async_playwright, Page
 
-# Add parent directory to path to import models
+# Add parent directory to path to import ml_models
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from models.clip_model import SoleDetectorCLIP
+from ml_models.clip_model import SoleDetectorCLIP
+from scrapers.base_scraper_mixin import BatchProcessingMixin
 
 # Configure logging
 logging.basicConfig(
@@ -35,12 +36,13 @@ IMAGE_DOWNLOAD_TIMEOUT = 10
 MAX_DOWNLOAD_RETRIES = 3
 
 
-class Military1stScraper:
+class Military1stScraper(BatchProcessingMixin):
     def __init__(self):
         """Initialize the scraper with CLIP model for sole detection."""
         logger.info("Initializing CLIP sole detector model...")
         self.clip = SoleDetectorCLIP()
         logger.info("✓ CLIP model loaded")
+        self.products = []  # Store scraped products
 
     async def get_total_pages(self, page: Page) -> int:
         """
@@ -331,9 +333,25 @@ class Military1stScraper:
         if not url:
             return None
 
+        # Headers to avoid 403 Forbidden
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer": "https://www.military1st.eu/",
+            "DNT": "1",
+            "Connection": "keep-alive",
+            "Sec-Fetch-Dest": "image",
+            "Sec-Fetch-Mode": "no-cors",
+            "Sec-Fetch-Site": "same-origin",
+        }
+
         for attempt in range(1, MAX_DOWNLOAD_RETRIES + 1):
             try:
-                resp = requests.get(url, timeout=IMAGE_DOWNLOAD_TIMEOUT)
+                resp = requests.get(
+                    url, timeout=IMAGE_DOWNLOAD_TIMEOUT, headers=headers
+                )
                 if resp.status_code == 200:
                     img = Image.open(BytesIO(resp.content)).convert("RGB")
 
@@ -355,6 +373,166 @@ class Military1stScraper:
                 asyncio.sleep(0.2 * attempt)
 
         return None
+
+    async def scrape(
+        self, batch_callback=None, batch_size: int = 20, is_cancelled=None
+    ):
+        """
+        Main scraping function with batch processing support.
+
+        Args:
+            batch_callback: Async function to call with each batch of products
+            batch_size: Number of products to collect before calling batch_callback
+            is_cancelled: Optional function to check if scraping should be cancelled
+
+        Process:
+        1. Launch browser and navigate to base URL
+        2. Collect all product links
+        3. Extract product details for each link
+        4. Process products in batches
+        """
+        if is_cancelled:
+            logger.info("🛑 Cancellation support enabled for this scraper")
+
+        logger.info("Starting Military1st scraper")
+        logger.info(f"Base URL: {BASE_URL}")
+        if batch_callback:
+            logger.info("Using real-time batch processing")
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=False)
+            page = await browser.new_page()
+
+            # Set viewport to standard size
+            await page.set_viewport_size({"width": 1280, "height": 1024})
+
+            try:
+                # Step 1: Collect product links
+                links = await self.collect_product_links(page)
+
+                if not links:
+                    logger.error("❌ No product links collected!")
+                    await browser.close()
+                    return
+
+                # Limit for safety during run
+                links = links[:100]  # Adjust as needed
+                logger.info(f"📌 Processing {len(links)} product links")
+
+                # Step 2: Process products with batch support
+                results = []
+                current_batch = []
+                should_stop = False
+
+                for idx, url in enumerate(links, 1):
+                    # Check for cancellation
+                    if is_cancelled and is_cancelled():
+                        logger.warning(
+                            "🛑 Cancellation detected - stopping scraper immediately"
+                        )
+                        should_stop = True
+                        break
+
+                    if should_stop:
+                        logger.info(
+                            "Stopping scraper early due to batch callback signal"
+                        )
+                        break
+
+                    try:
+                        logger.info(f"[{idx}/{len(links)}] Processing: {url}")
+                        product_data = await self.extract_product_details(page, url)
+
+                        # Only add products that have a sole image
+                        if product_data and product_data.get("sole"):
+                            sole_info = product_data["sole"]
+
+                            # Log scraped product details
+                            logger.info(f"✅ Scraped Product #{idx}:")
+                            logger.info(f"   Brand: Military 1st")
+                            logger.info(
+                                f"   Product Name: {product_data.get('product_name', 'Unknown')}"
+                            )
+                            logger.info(f"   Product URL: {product_data['url']}")
+                            logger.info(
+                                f"   Sole Image URL: {sole_info.get('url', 'N/A')[:80]}..."
+                            )
+                            logger.info(
+                                f"   Sole Confidence: {sole_info.get('confidence', 0):.3f}"
+                            )
+                            logger.info(
+                                f"   Total Images Found: {len(product_data.get('images', []))}"
+                            )
+
+                            # Normalize to expected format
+                            normalized_product = {
+                                "brand": "Military 1st",
+                                "name": product_data.get("product_name", "Unknown"),
+                                "url": product_data["url"],
+                                "image_url": sole_info.get("url"),
+                                "product_type": "boot",
+                            }
+
+                            results.append(normalized_product)
+                            current_batch.append(normalized_product)
+
+                            # Process batch when size is reached
+                            if len(current_batch) >= batch_size and batch_callback:
+                                logger.info(
+                                    f"Processing batch of {len(current_batch)} products..."
+                                )
+                                # Prepare batch with image downloads
+                                prepared_batch = self._prepare_batch_for_processing(
+                                    current_batch,
+                                    brand_field="brand",
+                                    name_field="name",
+                                    url_field="url",
+                                    image_url_field="image_url",
+                                )
+
+                                if prepared_batch:
+                                    should_continue = await batch_callback(
+                                        prepared_batch
+                                    )
+                                    if not should_continue:
+                                        should_stop = True
+                                        logger.info(
+                                            "Batch callback returned False, stopping scraper"
+                                        )
+
+                                current_batch = []  # Reset batch
+                        else:
+                            logger.warning(f"  ⚠️  No sole image found for {url}")
+
+                    except Exception as e:
+                        logger.error(
+                            f"[{idx}/{len(links)}] Failed to extract {url}: {e}"
+                        )
+                        continue
+
+                # Process remaining items in final batch
+                if current_batch and batch_callback and not should_stop:
+                    logger.info(
+                        f"Processing final batch of {len(current_batch)} products..."
+                    )
+                    # Prepare batch with image downloads
+                    prepared_batch = self._prepare_batch_for_processing(
+                        current_batch,
+                        brand_field="brand",
+                        name_field="name",
+                        url_field="url",
+                        image_url_field="image_url",
+                    )
+
+                    if prepared_batch:
+                        await batch_callback(prepared_batch)
+
+                logger.info(f"✅ Scraped {len(results)} products with sole images")
+
+            except Exception as e:
+                logger.error(f"Scraper failed: {e}", exc_info=True)
+            finally:
+                await browser.close()
 
 
 async def main():

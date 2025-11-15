@@ -1,6 +1,0 @@
-{
-  "brand": "Clarks",
-  "base_url": "https://www.clarks.com/en-gb/mens/mens-boots/m_boots_uk-c",
-  "products": [],
-  "error": "Page.goto: Timeout 90000ms exceeded.\nCall log:\n  - navigating to \"https://www.clarks.com/en-gb/mens/mens-boots/m_boots_uk-c\", waiting until \"domcontentloaded\"\n"
-}

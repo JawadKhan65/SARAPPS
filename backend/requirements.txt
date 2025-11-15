@@ -1,9 +1,39 @@
-opencv-python
+# Flask & Web Framework
+Flask
+Flask-SQLAlchemy
+Flask-JWT-Extended
+Flask-Cors
+Flask-Mail
+gunicorn
+
+# Database
+psycopg2-binary
+pgvector
+redis
+
+# Data Processing & ML
 numpy
 pandas
+opencv-python
 scikit-image
 scikit-learn
+scipy
 torch
-streamlit
-playwright
 transformers
+
+# Image Processing
+Pillow
+
+# Web Scraping
+playwright
+beautifulsoup4
+# Utilities
+python-dotenv
+python-dateutil
+requests
+# Security
+bcrypt
+cryptography
+pyotp
+qrcode
+APSchedulerwaitress
