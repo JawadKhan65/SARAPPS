@@ -5,7 +5,7 @@ from skimage.feature import local_binary_pattern
 
 
 def process_reference_sole(
-    image_path, target_size=(512, 512), keep_aspect=True, use_polar=True, debug=False
+    img, target_size=(512, 512), keep_aspect=True, use_polar=True, debug=False
 ):
     """
     Preprocess shoe sole image (reference or print) for rotation-robust similarity matching.
@@ -26,10 +26,6 @@ def process_reference_sole(
     Returns:
         np.ndarray: Processed edge (or polar-edge) image, same size for all
     """
-    # 1. Load image
-    img = cv.imread(image_path, cv.IMREAD_GRAYSCALE)
-    if img is None:
-        raise ValueError(f"Cannot load image: {image_path}")
 
     # 2. Resize and pad to fixed size
     if keep_aspect:
@@ -96,14 +92,14 @@ def process_reference_sole(
     return processed
 
 
-def compare_sole_images(img1_path, img2_path, debug=False):
+def compare_sole_images(img1, img2, debug=False):
     """
     Compare two shoe sole images using hybrid (ORB + Cosine) similarity.
     Returns a score between 0 and 1.
     """
     # 1. Preprocess both images
-    edges1 = process_reference_sole(img1_path)
-    edges2 = process_reference_sole(img2_path)
+    edges1 = process_reference_sole(img1)  # this will be uploaded image
+    edges2 = img2  # this would be image extracted from db
 
     # 2. --- ORB similarity ---
     orb = cv.ORB_create(nfeatures=10000)

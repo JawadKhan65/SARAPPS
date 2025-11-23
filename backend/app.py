@@ -1,3 +1,10 @@
+import os
+from datetime import datetime
+from dotenv import load_dotenv
+
+# Load environment variables FIRST before importing config
+load_dotenv()
+
 from flask import Flask
 from flask_cors import CORS
 from config import config
@@ -12,8 +19,7 @@ from models import (
     CrawlerStatistics,
     SystemConfig,
 )
-import os
-from datetime import datetime
+import firebase_config  # Initialize Firebase Admin SDK
 
 
 def create_app(config_name=None):
@@ -29,18 +35,17 @@ def create_app(config_name=None):
     jwt.init_app(app)
     mail.init_app(app)
 
-    # CORS setup
-    CORS(app, origins=app.config["CORS_ORIGINS"])
+    # CORS setup with proper preflight handling
+    CORS(
+        app,
+        origins=app.config["CORS_ORIGINS"],
+        supports_credentials=True,
+        allow_headers=["Content-Type", "Authorization"],
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    )
 
     # Logging setup
     setup_logging(app)
-
-    # Initialize crawler scheduler
-    from services.crawler_scheduler import get_scheduler
-
-    scheduler = get_scheduler()
-    scheduler.load_active_crawlers()
-    app.logger.info("✅ Crawler scheduler initialized and loaded active crawlers")
 
     # Create upload directories
     os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
@@ -81,6 +86,13 @@ def create_app(config_name=None):
     app.register_blueprint(
         images_bp
     )  # Uses /api/images prefix from blueprint definition
+
+    # Serve static files (logo for emails)
+    @app.route("/static/<path:filename>")
+    def serve_static(filename):
+        from flask import send_from_directory
+
+        return send_from_directory("static", filename)
 
     # Error handlers
     @app.errorhandler(404)

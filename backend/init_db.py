@@ -46,13 +46,11 @@ def init_database():
             from models import AdminUser
 
             # Check if admin exists
-            admin = AdminUser.query.filter_by(
-                email="admin@shoeidentifier.local"
-            ).first()
+            admin = AdminUser.query.filter_by(email="jawadkhan8464@gmail.com").first()
             if not admin:
                 admin = AdminUser(
                     username="admin",
-                    email="admin@shoeidentifier.local",
+                    email="jawadkhan8464@gmail.com",
                     password_hash=generate_password_hash("admin123"),
                     is_active=True,
                 )
@@ -60,7 +58,7 @@ def init_database():
                 db.session.commit()
                 print("✅ Default admin user created")
                 print("   Username: admin")
-                print("   Email: admin@shoeidentifier.local")
+                print("   Email: jawadkhan8464@gmail.com")
                 print("   Password: admin123")
             else:
                 print("✅ Admin user already exists")
@@ -105,6 +103,20 @@ def init_database():
             else:
                 print("⚠️  users.group_id column not found!")
 
+            # Check for OTP columns in users
+            otp_columns = db.session.execute(
+                text("""
+                SELECT column_name, data_type 
+                FROM information_schema.columns 
+                WHERE table_name = 'users' AND column_name IN ('otp_code', 'otp_code_expiry')
+            """)
+            ).fetchall()
+
+            if len(otp_columns) == 2:
+                print(f"✅ users OTP columns exist (otp_code, otp_code_expiry)")
+            else:
+                print("⚠️  users OTP columns not found!")
+
         except Exception as e:
             print(f"⚠️  Error verifying tables: {e}")
 
@@ -127,85 +139,71 @@ def init_database():
                     "name": "Amazon",
                     "website_url": "https://www.amazon.com",
                     "scraper_module": "amazon",
-                    "schedule_cron": "0 2 * * *",
                 },
                 {
                     "name": "Zappos",
                     "website_url": "https://www.zappos.com",
                     "scraper_module": "zappos",
-                    "schedule_cron": "0 3 * * *",
                 },
                 {
                     "name": "Zalando",
                     "website_url": "https://www.zalando.com",
                     "scraper_module": "zalando_playwright",
-                    "schedule_cron": "0 4 * * *",
-                },
-                {
-                    "name": "Footlocker",
-                    "website_url": "https://www.footlocker.com",
-                    "scraper_module": "footlocker",
-                    "schedule_cron": "0 5 * * *",
                 },
                 {
                     "name": "Decathlon",
                     "website_url": "https://www.decathlon.com",
                     "scraper_module": "decathlon",
-                    "schedule_cron": "0 6 * * *",
                 },
                 {
                     "name": "Clarks",
                     "website_url": "https://www.clarks.com",
                     "scraper_module": "clarks",
-                    "schedule_cron": "0 7 * * *",
                 },
                 {
                     "name": "Bergfreunde",
                     "website_url": "https://www.bergfreunde.com",
                     "scraper_module": "bergfreunde",
-                    "schedule_cron": "0 8 * * *",
                 },
                 {
                     "name": "Canterbury",
                     "website_url": "https://www.canterbury.com",
                     "scraper_module": "canterbury",
-                    "schedule_cron": "0 9 * * *",
                 },
                 {
                     "name": "Crockett & Jones (Men)",
                     "website_url": "https://www.crockettandjones.com/collections/mens-shoes",
                     "scraper_module": "crocket_jones_men",
-                    "schedule_cron": "0 10 * * *",
                 },
                 {
                     "name": "Crockett & Jones (Women)",
                     "website_url": "https://www.crockettandjones.com/collections/womens-shoes",
                     "scraper_module": "crocket_jones_women",
-                    "schedule_cron": "0 11 * * *",
                 },
                 {
                     "name": "Givenchy",
                     "website_url": "https://www.givenchy.com",
                     "scraper_module": "givenchy",
-                    "schedule_cron": "0 12 * * *",
                 },
                 {
                     "name": "John Lobb (UK)",
                     "website_url": "https://www.johnlobb.com/gb/en",
                     "scraper_module": "johnloob_playwright_en_gb",
-                    "schedule_cron": "0 13 * * *",
                 },
                 {
                     "name": "John Lobb (EU)",
                     "website_url": "https://www.johnlobb.com/eu/en",
                     "scraper_module": "johnloob_playwright_en_eu",
-                    "schedule_cron": "0 14 * * *",
                 },
                 {
                     "name": "Military 1st",
                     "website_url": "https://www.military1st.com",
                     "scraper_module": "military1st",
-                    "schedule_cron": "0 15 * * *",
+                },
+                {
+                    "name": "GearPoint",
+                    "website_url": "https://www.gearpoint.nl/en/search/shoes",
+                    "scraper_module": "gearpoint",
                 },
             ]
 
@@ -218,7 +216,6 @@ def init_database():
                     scraper_module=config["scraper_module"],
                     is_active=True,
                     min_uniqueness_threshold=30.0,
-                    schedule_cron=config["schedule_cron"],
                     is_running=False,
                     total_runs=0,
                     items_scraped=0,
@@ -241,9 +238,9 @@ def init_database():
         print("=" * 60)
         print("\nDefault Credentials:")
         print("  Username: admin")
-        print("  Email: admin@shoeidentifier.local")
+        print("  Email: jawadkhan8464@gmail.com")
         print("  Password: admin123")
-        print(f"\nCrawlers seeded: 14")
+        print("\nCrawlers seeded: 14")
         print("\nYou can now start the Flask application:")
         print("  python app.py")
         print()

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="250" height="100" viewBox="0 0 250 100">
+  <rect x="10" y="10" width="80" height="80" rx="15" ry="15" fill="#FF0000"/>
+  <text x="30" y="65" font-family="Helvetica" font-size="36" font-weight="bold" fill="#FFFFFF">SAR</text>
+  <text x="110" y="65" font-family="Helvetica" font-size="36" font-weight="bold" fill="#000000">Apps</text>
+</svg>

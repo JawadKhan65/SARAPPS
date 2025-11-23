@@ -5,10 +5,25 @@ from werkzeug.security import check_password_hash
 from flask_mail import Message
 import uuid
 import os
+import sys
 from datetime import datetime, timedelta
 from extensions import db, mail
 from models import User, UploadedImage, MatchResult, SoleImage
 from services.image_processor import ImageProcessor
+import numpy as np
+import cv2 as cv
+from PIL import Image
+import io
+
+# Add line_tracing module to path
+line_tracing_path = os.path.join(os.path.dirname(__file__), "..", "line_tracing_utils")
+sys.path.insert(0, line_tracing_path)
+
+try:
+    from line_tracing import compare_sole_images, process_reference_sole
+except ImportError:
+    compare_sole_images = None
+    process_reference_sole = None
 
 user_bp = Blueprint("user", __name__)
 
@@ -140,6 +155,26 @@ def upload_image():
         image_bytes = process_result["image_array"].tobytes()
         image_hash = hashlib.sha256(image_bytes).hexdigest()
 
+        # Convert numpy types to Python native types
+        quality_score = float(process_result["quality_score"])
+
+        # Check if image already exists for this user
+        existing_image = UploadedImage.query.filter_by(
+            user_id=user_id, image_hash=image_hash
+        ).first()
+
+        if existing_image:
+            current_app.logger.info(
+                f"Image already uploaded by user {user_id}: {existing_image.id}"
+            )
+            return jsonify(
+                {
+                    "message": "Image already uploaded",
+                    "image_id": existing_image.id,
+                    "quality_score": existing_image.quality_score,
+                }
+            ), 200
+
         # Create uploaded image record
         uploaded_image = UploadedImage(
             id=str(uuid.uuid4()),
@@ -148,7 +183,7 @@ def upload_image():
             processed_image_path=processed_path,
             image_hash=image_hash,
             feature_vector=processor.serialize_features(process_result["features"]),
-            quality_score=process_result["quality_score"],
+            quality_score=quality_score,
             uploaded_at=datetime.utcnow(),
         )
 
@@ -166,7 +201,7 @@ def upload_image():
             {
                 "message": "Image uploaded successfully",
                 "image_id": uploaded_image.id,
-                "quality_score": process_result["quality_score"],
+                "quality_score": quality_score,
             }
         ), 201
 
@@ -180,10 +215,14 @@ def upload_image():
 def match_image(image_id):
     """
     Find matching sole images for uploaded image
-    Returns top 4 matches with confidence scores
+    Returns top N matches with confidence scores (default 4, max 20)
     """
     user_id = get_jwt_identity()
     user = User.query.get(user_id)
+
+    # Get limit from request body (default 4, max 20)
+    data = request.get_json() or {}
+    limit = min(int(data.get("limit", 4)), 20)
 
     if not user:
         return jsonify({"error": "User not found"}), 404
@@ -197,20 +236,110 @@ def match_image(image_id):
     try:
         processor = ImageProcessor()
 
-        # Deserialize uploaded image features
-        uploaded_features = processor.deserialize_features(
-            uploaded_image.feature_vector
-        )
+        # Load uploaded image - use ORIGINAL file (not processed) for compare_sole_images
+        # compare_sole_images needs to do its own processing
+        uploaded_img_array = None
+        uploaded_features = None
 
-        # Get all sole images for comparison
+        if os.path.exists(uploaded_image.file_path):
+            # Load ORIGINAL image file (compare_sole_images will process it)
+            uploaded_img_array = cv.imread(uploaded_image.file_path, cv.IMREAD_COLOR)
+            if uploaded_img_array is not None:
+                # Convert to grayscale for compare_sole_images
+                uploaded_img_array = cv.cvtColor(uploaded_img_array, cv.COLOR_BGR2GRAY)
+
+        # Also load feature vector for quick filtering
+        if uploaded_image.feature_vector:
+            uploaded_features = processor.deserialize_features(
+                uploaded_image.feature_vector
+            )
+
+        # Step 1: Get all sole images and do quick feature-based filtering to get top candidates
+        # This reduces the number of images we need to do expensive compare_sole_images on
         sole_images = SoleImage.query.all()
 
-        matches = []
+        # Get more candidates using fast feature comparison (use ALL for thorough matching)
+        candidate_limit = len(sole_images)  # Process all for accurate results
+        candidates = []
+
         for sole_image in sole_images:
-            sole_features = processor.deserialize_features(sole_image.feature_vector)
-            similarity = processor.calculate_similarity(
-                uploaded_features, sole_features
-            )
+            # Quick feature-based similarity check
+            if uploaded_features and sole_image.feature_vector:
+                try:
+                    sole_features = processor.deserialize_features(
+                        sole_image.feature_vector
+                    )
+                    similarity = processor.calculate_similarity(
+                        uploaded_features, sole_features
+                    )
+                    candidates.append(
+                        {"sole_image": sole_image, "quick_score": similarity}
+                    )
+                except Exception as e:
+                    current_app.logger.warning(
+                        f"Feature comparison failed for {sole_image.id}: {str(e)}"
+                    )
+                    continue
+
+        # Sort candidates by quick score and get top ones
+        candidates.sort(key=lambda x: x["quick_score"], reverse=True)
+        top_candidates = candidates[:candidate_limit]
+
+        # Step 2: Now use compare_sole_images on top candidates for accurate matching
+        matches = []
+        for candidate in top_candidates:
+            sole_image = candidate["sole_image"]
+
+            # Use line_tracing comparison if available and images loaded
+            if (
+                compare_sole_images
+                and uploaded_img_array is not None
+                and sole_image.processed_image_data
+            ):
+                try:
+                    # Load DB sole image (already processed)
+                    db_img_bytes = sole_image.processed_image_data
+                    db_img_array = cv.imdecode(
+                        np.frombuffer(db_img_bytes, np.uint8), cv.IMREAD_GRAYSCALE
+                    )
+
+                    if db_img_array is None:
+                        current_app.logger.warning(
+                            f"Failed to decode image for {sole_image.id}"
+                        )
+                        similarity = candidate["quick_score"]
+                    else:
+                        # Use compare_sole_images for accurate similarity
+                        # uploaded_img_array (grayscale original) will be processed inside compare_sole_images
+                        # db_img_array is already processed from DB
+                        similarity = compare_sole_images(
+                            uploaded_img_array,  # Original grayscale, will be processed
+                            db_img_array,  # Already processed matrix from DB
+                            debug=False,
+                        )
+                        current_app.logger.debug(
+                            f"compare_sole_images result for {sole_image.id}: {similarity:.4f}"
+                        )
+                except Exception as e:
+                    current_app.logger.warning(
+                        f"Line tracing comparison failed for {sole_image.id}: {str(e)}"
+                    )
+                    import traceback
+
+                    current_app.logger.debug(traceback.format_exc())
+                    # Use the quick score as fallback
+                    similarity = candidate["quick_score"]
+            else:
+                # Fallback: use quick score
+                if uploaded_img_array is None:
+                    current_app.logger.warning(
+                        "Uploaded image array is None, using feature-based matching only"
+                    )
+                if not compare_sole_images:
+                    current_app.logger.warning(
+                        "compare_sole_images function not available"
+                    )
+                similarity = candidate["quick_score"]
 
             matches.append(
                 {
@@ -221,19 +350,54 @@ def match_image(image_id):
                     "source_url": sole_image.source_url,
                     "confidence": float(similarity),
                     "quality_score": sole_image.quality_score,
+                    "feature_vector_size": len(
+                        processor.deserialize_features(sole_image.feature_vector) or []
+                    ),
                     "crawled_at": sole_image.crawled_at.isoformat()
                     if sole_image.crawled_at
                     else None,
                 }
             )
 
-        # Sort by confidence and get top 4
+        # Sort by confidence and get top N matches (respecting user's limit)
         matches.sort(key=lambda x: x["confidence"], reverse=True)
-        top_matches = matches[:4]
+        top_matches = matches[:limit]
 
-        # Ensure we have 4 matches (pad with nulls if needed)
+        current_app.logger.info(
+            f"Matching complete: Found {len(matches)} total matches, "
+            f"returning top {len(top_matches)} (limit={limit})"
+        )
+
+        # Check if no matches found
+        if not matches or all(m["confidence"] == 0 for m in matches):
+            current_app.logger.info(
+                f"No matches found for user {user_id} - database may be empty"
+            )
+            return jsonify(
+                {
+                    "match_id": None,
+                    "uploaded_image_id": image_id,
+                    "matches": [],
+                    "message": "No matches found. The database may not contain any shoe images yet.",
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
+            ), 200
+
+        # Ensure we have at least 4 matches (pad with nulls if needed)
         while len(top_matches) < 4:
             top_matches.append(None)
+
+        # Calculate overall similarity as average of all match scores
+        confidence_scores = [
+            top_matches[0]["confidence"] if top_matches[0] else 0,
+            top_matches[1]["confidence"] if top_matches[1] else 0,
+            top_matches[2]["confidence"] if top_matches[2] else 0,
+            top_matches[3]["confidence"] if top_matches[3] else 0,
+        ]
+        valid_scores = [score for score in confidence_scores if score > 0]
+        overall_similarity = (
+            sum(valid_scores) / len(valid_scores) if valid_scores else 0
+        )
 
         # Create match result record
         match_result = MatchResult(
@@ -256,6 +420,7 @@ def match_image(image_id):
             if top_matches[3]
             else None,
             quaternary_confidence=top_matches[3]["confidence"] if top_matches[3] else 0,
+            overall_similarity=overall_similarity,
             matching_time_ms=0,
             matched_at=datetime.utcnow(),
         )
@@ -266,7 +431,7 @@ def match_image(image_id):
         current_app.logger.info(
             f"Image matched for user {user_id}: "
             f"primary={top_matches[0]['brand'] if top_matches[0] else 'None'} "
-            f"({top_matches[0]['confidence']:.2f})"
+            f"({top_matches[0]['confidence'] if top_matches[0] else 0:.2f})"
         )
 
         return jsonify(
@@ -433,6 +598,76 @@ def list_uploads():
     ), 200
 
 
+@user_bp.route("/matches", methods=["GET"])
+@jwt_required()
+def list_matches():
+    """List user's match results with pagination and filtering"""
+    user_id = get_jwt_identity()
+
+    page = request.args.get("page", 1, type=int)
+    per_page = request.args.get("per_page", 20, type=int)
+    filter_type = request.args.get("filter", "all")
+
+    # Base query for user's matches
+    query = MatchResult.query.filter_by(user_id=user_id)
+
+    # Apply filters
+    if filter_type == "confirmed":
+        query = query.filter_by(is_confirmed=True)
+    elif filter_type == "pending":
+        query = query.filter_by(is_confirmed=False)
+    elif filter_type == "high_confidence":
+        query = query.filter(MatchResult.similarity_score > 0.75)
+
+    # Order by match date descending
+    query = query.order_by(MatchResult.matched_at.desc())
+
+    # Paginate
+    pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+
+    matches = []
+    for match in pagination.items:
+        sole_image = (
+            SoleImage.query.get(match.primary_match_id)
+            if match.primary_match_id
+            else None
+        )
+        uploaded_image = UploadedImage.query.get(match.uploaded_image_id)
+
+        if sole_image:
+            matches.append(
+                {
+                    "id": match.id,
+                    "similarity_score": float(match.primary_confidence)
+                    if match.primary_confidence
+                    else 0.0,
+                    "is_confirmed": bool(match.confirmed_match),
+                    "matched_at": match.matched_at.isoformat()
+                    if match.matched_at
+                    else None,
+                    "shoe": {
+                        "id": sole_image.id,
+                        "brand": sole_image.brand,
+                        "product_name": sole_image.product_name,
+                        "product_type": sole_image.product_type,
+                        "source_url": sole_image.source_url,
+                        "image_url": f"/api/sole-images/{sole_image.id}/image",
+                    },
+                    "uploaded_image_id": uploaded_image.id if uploaded_image else None,
+                }
+            )
+
+    return jsonify(
+        {
+            "matches": matches,
+            "total": pagination.total,
+            "pages": pagination.pages,
+            "current_page": page,
+            "per_page": per_page,
+        }
+    ), 200
+
+
 @user_bp.route("/delete-image/<image_id>", methods=["DELETE"])
 @jwt_required()
 def delete_image(image_id):
@@ -563,3 +798,106 @@ def confirm_delete_account():
     except Exception as e:
         current_app.logger.error(f"Error deleting account: {str(e)}")
         return jsonify({"error": "Failed to delete account"}), 500
+
+
+@user_bp.route("/image/<image_id>/features", methods=["GET"])
+@jwt_required()
+def get_image_features(image_id):
+    """Extract and return feature processing steps for uploaded image"""
+    user_id = get_jwt_identity()
+
+    uploaded_image = UploadedImage.query.filter_by(id=image_id, user_id=user_id).first()
+
+    if not uploaded_image:
+        return jsonify({"error": "Image not found"}), 404
+
+    if not os.path.exists(uploaded_image.file_path):
+        return jsonify({"error": "Image file not found"}), 404
+
+    try:
+        from line_tracing_utils.line_tracing import extract_shoeprint_features
+        import base64
+
+        # Extract features
+        (
+            l_channel,
+            a_channel,
+            b_channel,
+            denoised_l,
+            enhanced_l,
+            binary_pattern,
+            cleaned_pattern,
+            lbp,
+            lbp_features,
+        ) = extract_shoeprint_features(uploaded_image.file_path)
+
+        def encode_image(arr):
+            """Convert numpy array to base64 encoded PNG"""
+            if arr.dtype != np.uint8:
+                # Normalize to 0-255
+                arr_min, arr_max = arr.min(), arr.max()
+                if arr_max > arr_min:
+                    arr = ((arr - arr_min) / (arr_max - arr_min) * 255).astype(np.uint8)
+                else:
+                    arr = np.clip(arr, 0, 255).astype(np.uint8)
+
+            _, buffer = cv.imencode(".png", arr)
+            return base64.b64encode(buffer).decode("utf-8")
+
+        # Prepare response with all processing steps
+        features_data = {
+            "l_channel": f"data:image/png;base64,{encode_image(l_channel)}",
+            "a_channel": f"data:image/png;base64,{encode_image(a_channel)}",
+            "b_channel": f"data:image/png;base64,{encode_image(b_channel)}",
+            "denoised_l": f"data:image/png;base64,{encode_image(denoised_l)}",
+            "enhanced_l": f"data:image/png;base64,{encode_image(enhanced_l)}",
+            "binary_pattern": f"data:image/png;base64,{encode_image(binary_pattern)}",
+            "cleaned_pattern": f"data:image/png;base64,{encode_image(cleaned_pattern)}",
+            "lbp": f"data:image/png;base64,{encode_image(lbp)}",
+            "lbp_features": lbp_features.flatten().tolist()[:200]
+            if lbp_features is not None
+            else [],
+            "lbp_features_length": lbp_features.size if lbp_features is not None else 0,
+        }
+
+        return jsonify(features_data), 200
+
+    except Exception as e:
+        current_app.logger.error(f"Error extracting features: {str(e)}")
+        import traceback
+
+        current_app.logger.debug(traceback.format_exc())
+        return jsonify({"error": f"Failed to extract features: {str(e)}"}), 500
+
+
+@user_bp.route("/sole-image/<sole_image_id>", methods=["GET"])
+def get_sole_image(sole_image_id):
+    """Get sole image data (public endpoint for displaying matches)"""
+    sole_image = SoleImage.query.get(sole_image_id)
+
+    if not sole_image:
+        return jsonify({"error": "Image not found"}), 404
+
+    try:
+        import base64
+
+        if sole_image.processed_image_data:
+            # Return processed image as base64
+            img_base64 = base64.b64encode(sole_image.processed_image_data).decode(
+                "utf-8"
+            )
+            return jsonify(
+                {
+                    "image": f"data:image/png;base64,{img_base64}",
+                    "brand": sole_image.brand,
+                    "product_name": sole_image.product_name,
+                    "product_type": sole_image.product_type,
+                    "source_url": sole_image.source_url,
+                }
+            ), 200
+        else:
+            return jsonify({"error": "No image data available"}), 404
+
+    except Exception as e:
+        current_app.logger.error(f"Error getting sole image: {str(e)}")
+        return jsonify({"error": "Failed to get image"}), 500

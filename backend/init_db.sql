@@ -46,6 +46,10 @@ CREATE TABLE IF NOT EXISTS users (
     failed_login_attempts INTEGER DEFAULT 0,
     last_failed_login TIMESTAMP,
     
+    -- OTP for login verification
+    otp_code VARCHAR(6),
+    otp_code_expiry TIMESTAMP,
+    
     -- MFA
     mfa_enabled BOOLEAN DEFAULT false,
     mfa_secret VARCHAR(32),

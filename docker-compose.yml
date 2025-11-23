@@ -1,0 +1,155 @@
+version: '3.9'
+
+services:
+  # PostgreSQL Database with pgvector support
+  postgres:
+    image: pgvector/pgvector:pg15-latest
+    container_name: stip_postgres
+    environment:
+      POSTGRES_USER: stip_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-stip_password_change_me}
+      POSTGRES_DB: stip_production
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init_db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stip_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - stip_network
+    restart: unless-stopped
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: stip_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - stip_network
+    restart: unless-stopped
+
+  # Flask Backend
+  backend:
+    build:
+      context: ./stip-backend
+      dockerfile: Dockerfile
+    container_name: stip_backend
+    environment:
+      FLASK_APP: app.py
+      FLASK_ENV: ${FLASK_ENV:-production}
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production}
+      DATABASE_URL: postgresql://stip_user:${DB_PASSWORD:-stip_password_change_me}@postgres:5432/stip_production
+      REDIS_URL: redis://redis:6379/0
+      MAIL_SERVER: ${MAIL_SERVER:-smtp.gmail.com}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_USERNAME: ${MAIL_USERNAME}
+      MAIL_PASSWORD: ${MAIL_PASSWORD}
+      MAIL_USE_TLS: ${MAIL_USE_TLS:-True}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,https://localhost:443}
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./stip-backend:/app
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/database/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - stip_network
+    restart: unless-stopped
+
+  # Frontend (React/Next.js) - Port 443
+  frontend:
+    build:
+      context: ./stip-frontend
+      dockerfile: Dockerfile
+      args:
+        REACT_APP_API_URL: ${REACT_APP_API_URL:-http://localhost:5000}
+    container_name: stip_frontend
+    ports:
+      - "443:443"
+      - "3000:3000"
+    environment:
+      REACT_APP_API_URL: ${REACT_APP_API_URL:-http://localhost:5000}
+      REACT_APP_ENV: ${FLASK_ENV:-production}
+    depends_on:
+      - backend
+    volumes:
+      - ./stip-frontend:/app
+      - ./stip-frontend/node_modules:/app/node_modules
+    networks:
+      - stip_network
+    restart: unless-stopped
+
+  # Admin Dashboard (React/Next.js) - Port 8443
+  admin:
+    build:
+      context: ./stip-admin
+      dockerfile: Dockerfile
+      args:
+        REACT_APP_API_URL: ${REACT_APP_API_URL:-http://localhost:5000}
+    container_name: stip_admin
+    ports:
+      - "8443:443"
+      - "3001:3000"
+    environment:
+      REACT_APP_API_URL: ${REACT_APP_API_URL:-http://localhost:5000}
+      REACT_APP_ENV: ${FLASK_ENV:-production}
+    depends_on:
+      - backend
+    volumes:
+      - ./stip-admin:/app
+      - ./stip-admin/node_modules:/app/node_modules
+    networks:
+      - stip_network
+    restart: unless-stopped
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: stip_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+      - ./static:/usr/share/nginx/html:ro
+    depends_on:
+      - backend
+      - frontend
+      - admin
+    networks:
+      - stip_network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  stip_network:
+    driver: bridge

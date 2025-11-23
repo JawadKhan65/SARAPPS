@@ -28,6 +28,10 @@ class User(db.Model):
     failed_login_attempts = db.Column(db.Integer, default=0)
     last_failed_login = db.Column(db.DateTime, nullable=True)
 
+    # OTP for login
+    otp_code = db.Column(db.String(6), nullable=True)
+    otp_code_expiry = db.Column(db.DateTime, nullable=True)
+
     # Timestamps
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
     last_login = db.Column(db.DateTime, nullable=True)
@@ -452,7 +456,7 @@ class SystemConfig(db.Model):
     session_timeout_minutes = db.Column(db.Integer, default=15)
     max_login_attempts = db.Column(db.Integer, default=5)
     login_lockout_minutes = db.Column(db.Integer, default=15)
-    password_min_length = db.Column(db.Integer, default=15)
+    password_min_length = db.Column(db.Integer, default=9)
 
     last_updated = db.Column(
         db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow

@@ -5,7 +5,6 @@ import asyncio
 from extensions import db
 from models import Crawler, CrawlerRun, CrawlerStatistics, AdminUser
 from services.scraper_manager import get_scraper_manager, cleanup_scraper_manager
-from services.crawler_scheduler import get_scheduler
 import uuid
 
 crawlers_bp = Blueprint("crawlers", __name__)
@@ -38,10 +37,6 @@ def list_crawlers():
                 "progress_percentage": crawler.progress_percentage,
                 "current_batch": crawler.current_batch,
                 "total_batches": crawler.total_batches,
-                "schedule_cron": crawler.schedule_cron,
-                "next_run_at": crawler.next_run_at.isoformat()
-                if crawler.next_run_at
-                else None,
                 "total_runs": crawler.total_runs,
                 "items_scraped": crawler.items_scraped,
                 "current_run_items": crawler.current_run_items,
@@ -121,10 +116,6 @@ def get_crawler(crawler_id):
             "is_running": crawler.is_running,
             "run_type": crawler.run_type,
             "progress_percentage": crawler.progress_percentage,
-            "schedule_cron": crawler.schedule_cron,
-            "next_run_at": crawler.next_run_at.isoformat()
-            if crawler.next_run_at
-            else None,
             "total_runs": crawler.total_runs,
             "items_scraped": crawler.items_scraped,
             "uniqueness_percentage": crawler.uniqueness_percentage,
@@ -155,6 +146,17 @@ def start_crawler(crawler_id):
 
     if not crawler.is_active:
         return jsonify({"error": "Crawler is disabled"}), 403
+
+    # Check if any other crawler is currently running (single-instance enforcement)
+    running_crawler = Crawler.query.filter_by(is_running=True).first()
+    if running_crawler:
+        return jsonify(
+            {
+                "error": f"Another crawler is already running: {running_crawler.name}",
+                "running_crawler_id": running_crawler.id,
+                "running_crawler_name": running_crawler.name,
+            }
+        ), 409
 
     try:
         # Get scraper manager and start
@@ -232,77 +234,6 @@ def stop_crawler(crawler_id):
         return jsonify({"error": "Failed to stop crawler"}), 500
 
 
-@crawlers_bp.route("/<crawler_id>/schedule", methods=["PUT", "OPTIONS"])
-@jwt_required()
-def update_crawler_schedule(crawler_id):
-    """Update crawler schedule (cron format)"""
-    if request.method == "OPTIONS":
-        return "", 204
-
-    admin_id = get_jwt_identity()
-    crawler = Crawler.query.get(crawler_id)
-
-    if not crawler:
-        return jsonify({"error": "Crawler not found"}), 404
-
-    data = request.get_json()
-    cron_expression = data.get("schedule")
-
-    if not cron_expression:
-        return jsonify({"error": "Schedule required (cron format)"}), 400
-
-    try:
-        # Update crawler schedule in database
-        crawler.schedule_cron = cron_expression
-        crawler.scheduled_by = admin_id
-        db.session.commit()
-
-        # Update scheduler
-        scheduler = get_scheduler()
-        success = scheduler.add_crawler_job(crawler_id, cron_expression)
-
-        if success:
-            current_app.logger.info(
-                f"📅 Crawler schedule updated: {crawler.name} -> {cron_expression}"
-            )
-            return jsonify(
-                {"message": "Schedule updated", "schedule": cron_expression}
-            ), 200
-        else:
-            return jsonify({"error": "Invalid cron expression"}), 400
-
-    except Exception as e:
-        current_app.logger.error(f"Error updating schedule: {str(e)}")
-        db.session.rollback()
-        return jsonify({"error": "Failed to update schedule"}), 500
-
-
-@crawlers_bp.route("/<crawler_id>/schedule", methods=["DELETE"])
-@jwt_required()
-def remove_crawler_schedule(crawler_id):
-    """Remove crawler schedule"""
-    crawler = Crawler.query.get(crawler_id)
-
-    if not crawler:
-        return jsonify({"error": "Crawler not found"}), 404
-
-    try:
-        crawler.schedule_cron = None
-        crawler.next_run_at = None
-        db.session.commit()
-
-        # Remove from scheduler
-        scheduler = get_scheduler()
-        scheduler.remove_crawler_job(crawler_id)
-
-        current_app.logger.info(f"📅 Crawler schedule removed: {crawler.name}")
-        return jsonify({"message": "Schedule removed"}), 200
-
-    except Exception as e:
-        current_app.logger.error(f"Error removing schedule: {str(e)}")
-        return jsonify({"error": "Failed to remove schedule"}), 500
-
-
 @crawlers_bp.route("/<crawler_id>/toggle", methods=["PUT", "OPTIONS"])
 @jwt_required()
 def toggle_crawler(crawler_id):
@@ -321,13 +252,6 @@ def toggle_crawler(crawler_id):
 
         status = "enabled" if crawler.is_active else "disabled"
         current_app.logger.info(f"Crawler {status}: {crawler.name}")
-
-        # Pause/resume schedule
-        scheduler = get_scheduler()
-        if crawler.is_active and crawler.schedule_cron:
-            scheduler.add_crawler_job(crawler_id, crawler.schedule_cron)
-        else:
-            scheduler.remove_crawler_job(crawler_id)
 
         return jsonify(
             {"message": f"Crawler {status}", "is_active": crawler.is_active}
@@ -467,17 +391,11 @@ def create_crawler():
             name=data["name"],
             website_url=data["website_url"],
             scraper_module=data.get("scraper_module"),
-            schedule_cron=data.get("schedule_cron"),
             min_uniqueness_threshold=data.get("min_uniqueness_threshold", 30.0),
         )
 
         db.session.add(crawler)
         db.session.commit()
-
-        # Add to scheduler if has cron
-        if crawler.schedule_cron:
-            scheduler = get_scheduler()
-            scheduler.add_crawler_job(crawler.id, crawler.schedule_cron)
 
         current_app.logger.info(f"✨ New crawler created: {crawler.name}")
         return jsonify({"message": "Crawler created", "id": crawler.id}), 201

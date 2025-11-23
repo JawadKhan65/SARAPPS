@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, jsonify, current_app, render_template
 from flask_jwt_extended import (
     create_access_token,
     create_refresh_token,
@@ -9,6 +9,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from extensions import db, mail
 from models import User, AdminUser
 from flask_mail import Message
+import os
 import uuid
 import hashlib
 import secrets
@@ -17,6 +18,11 @@ import pyotp
 import qrcode
 from io import BytesIO
 import base64
+from firebase_config import (
+    verify_firebase_token,
+    create_firebase_user,
+    delete_firebase_user,
+)
 
 auth_bp = Blueprint("auth", __name__)
 
@@ -24,11 +30,61 @@ auth_bp = Blueprint("auth", __name__)
 def send_email(recipient, subject, body, html=None):
     """Send email notification"""
     try:
-        msg = Message(subject=subject, recipients=[recipient], body=body, html=html)
+        msg = Message(subject=subject, recipients=[recipient])
+        msg.body = body
+        if html:
+            msg.html = html
+            # Attach inline logo if template references cid:stip_logo
+            try:
+                if "cid:stip_logo" in html:
+                    static_dir = os.path.join(
+                        os.path.dirname(os.path.dirname(__file__)), "static"
+                    )
+                    logo_path_small = os.path.join(static_dir, "logo-small.png")
+                    logo_path = os.path.join(static_dir, "logo.png")
+                    chosen_path = (
+                        logo_path_small
+                        if os.path.isfile(logo_path_small)
+                        else logo_path
+                        if os.path.isfile(logo_path)
+                        else None
+                    )
+                    if chosen_path:
+                        with open(chosen_path, "rb") as f:
+                            img_bytes = f.read()
+                        # Attach as inline with Content-ID matching cid reference
+                        msg.attach(
+                            filename=os.path.basename(chosen_path),
+                            content_type="image/png",
+                            data=img_bytes,
+                            disposition="inline",
+                            headers={"Content-ID": "<stip_logo>"},
+                        )
+                        current_app.logger.info(
+                            f"Attached inline logo for email (size: {len(img_bytes)} bytes)"
+                        )
+                    else:
+                        current_app.logger.warning(
+                            "Logo image not found in backend/static; skipping inline attachment"
+                        )
+            except Exception as attach_err:
+                current_app.logger.error(
+                    f"Failed to attach inline logo: {str(attach_err)}"
+                )
+            current_app.logger.info(
+                f"Sending HTML email to {recipient}: {subject} (HTML length: {len(html)} chars)"
+            )
+        else:
+            current_app.logger.info(
+                f"Sending plain text email to {recipient}: {subject}"
+            )
         mail.send(msg)
-        current_app.logger.info(f"Email sent to {recipient}: {subject}")
+        current_app.logger.info(f"✅ Email sent successfully to {recipient}")
     except Exception as e:
-        current_app.logger.error(f"Failed to send email to {recipient}: {str(e)}")
+        current_app.logger.error(f"❌ Failed to send email to {recipient}: {str(e)}")
+        import traceback
+
+        current_app.logger.error(f"Traceback: {traceback.format_exc()}")
 
 
 def get_device_fingerprint():
@@ -52,9 +108,9 @@ def register():
     ):
         return jsonify({"error": "Missing required fields"}), 400
 
-    # Validate password length (minimum 15 characters for security)
-    if len(data.get("password", "")) < 15:
-        return jsonify({"error": "Password must be at least 15 characters"}), 400
+    # Validate password length (minimum 9 characters for security)
+    if len(data.get("password", "")) < 9:
+        return jsonify({"error": "Password must be at least 9 characters"}), 400
 
     # Check if user exists
     if User.query.filter_by(email=data["email"]).first():
@@ -150,9 +206,210 @@ def login():
     if not user.is_active:
         return jsonify({"error": "Account is disabled"}), 403
 
+    # Generate and send OTP for login verification
+    current_app.logger.info(f"🔐 Generating OTP for user: {user.email}")
+    otp_code = secrets.randbelow(1000000)
+    user.otp_code = str(otp_code).zfill(6)
+    user.otp_code_expiry = datetime.utcnow() + timedelta(minutes=5)
+    user.failed_login_attempts = 0
+    db.session.commit()
+
+    # Log OTP code for development
+    current_app.logger.info(f"🔐 OTP Generated for {user.email}: {user.otp_code}")
+
+    # Send OTP email
+    try:
+        html_content = render_template(
+            "otp_email.html",
+            username=user.username or user.email.split("@")[0],
+            otp_code=user.otp_code,
+            expiry_minutes=5,
+        )
+        send_email(
+            user.email,
+            "STIP - Your Login Verification Code",
+            f"Your verification code is: {user.otp_code}\n\nThis code will expire in 5 minutes.",
+            html=html_content,
+        )
+        current_app.logger.info(f"✅ OTP email sent to {user.email}")
+    except Exception as e:
+        current_app.logger.error(f"Failed to send OTP email: {str(e)}")
+
+    return jsonify(
+        {
+            "message": "OTP sent to email",
+            "otp_required": True,
+            "email": user.email,
+        }
+    ), 200
+
+
+@auth_bp.route("/verify-otp", methods=["POST", "OPTIONS"])
+def verify_otp():
+    """Verify OTP and complete user login"""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"}), 200
+
+    data = request.get_json()
+
+    if not data or not data.get("email") or not data.get("otp_code"):
+        return jsonify({"error": "Missing email or OTP code"}), 400
+
+    user = User.query.filter_by(email=data["email"]).first()
+
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    if not user.otp_code or not user.otp_code_expiry:
+        return jsonify({"error": "No active OTP code"}), 400
+
+    if datetime.utcnow() > user.otp_code_expiry:
+        user.otp_code = None
+        db.session.commit()
+        return jsonify({"error": "OTP code expired"}), 401
+
+    if user.otp_code != data["otp_code"]:
+        current_app.logger.warning(f"Invalid OTP attempt for user: {user.email}")
+        return jsonify({"error": "Invalid OTP code"}), 401
+
+    # OTP verified - complete login
+    user.last_login = datetime.utcnow()
+    user.last_login_ip = request.remote_addr
+    user.otp_code = None
+    user.otp_code_expiry = None
+
+    # Handle device fingerprint and remember login
+    device_fingerprint = get_device_fingerprint()
+    remember_token = None
+
+    if data.get("remember_login"):
+        remember_token = secrets.token_urlsafe(32)
+        user.remember_token = remember_token
+
+        if user.trusted_devices is None:
+            user.trusted_devices = []
+
+        # Add device to trusted devices list if not already present
+        device_info = {
+            "fingerprint": device_fingerprint,
+            "user_agent": request.headers.get("User-Agent", ""),
+            "trusted_at": datetime.utcnow().isoformat(),
+            "last_used": datetime.utcnow().isoformat(),
+        }
+
+        # Remove existing entry for this device if present
+        user.trusted_devices = [
+            d
+            for d in user.trusted_devices
+            if d.get("fingerprint") != device_fingerprint
+        ]
+        # Add the new/updated device info
+        user.trusted_devices.append(device_info)
+
+    db.session.commit()
+
+    # Send successful login notification (HTML template)
+    try:
+        html_content = render_template(
+            "login_notification.html",
+            username=user.username or user.email.split("@")[0],
+            login_time=datetime.utcnow().strftime("%B %d, %Y at %I:%M %p UTC"),
+            ip_address=request.remote_addr or "Unknown",
+            device=request.headers.get("User-Agent", "Unknown Device")[:50],
+        )
+        send_email(
+            user.email,
+            "STIP - New Login Detected",
+            f"New login to your STIP account at {datetime.utcnow().strftime('%B %d, %Y at %I:%M %p UTC')}",
+            html=html_content,
+        )
+    except Exception as e:
+        current_app.logger.error(f"Failed to send login notification: {str(e)}")
+
+    # Create tokens
+    access_token = create_access_token(identity=user.id)
+    refresh_token = create_refresh_token(identity=user.id)
+
+    # Get profile image from group if user is in a group
+    profile_image_url = None
+    if user.group_id:
+        from models import UserGroup
+
+        group = UserGroup.query.get(user.group_id)
+        if group and group.profile_image_data:
+            profile_image_url = (
+                f"http://localhost:5000/api/admin/groups/{group.id}/image"
+            )
+
+    response = {
+        "message": "Login successful",
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "username": user.username,
+            "dark_mode": user.dark_mode,
+            "language": user.language,
+            "group_id": str(user.group_id) if user.group_id else None,
+            "profile_image_url": profile_image_url,
+        },
+    }
+
+    if remember_token:
+        response["remember_token"] = remember_token
+
+    current_app.logger.info(f"✅ User login completed: {user.email}")
+
+    return jsonify(response), 200
+
+
+@auth_bp.route("/login-original", methods=["POST"])
+def login_original():
+    """DEPRECATED: Original login without OTP (kept for backward compatibility)"""
+    data = request.get_json()
+
+    if not data or not data.get("email") or not data.get("password"):
+        return jsonify({"error": "Missing email or password"}), 400
+
+    user = User.query.filter_by(email=data["email"]).first()
+
+    if not user:
+        return jsonify({"error": "Invalid credentials"}), 401
+
+    # Check if user is locked out due to failed attempts
+    if user.failed_login_attempts >= 5:
+        lockout_duration = timedelta(
+            minutes=15 * (2 ** (user.failed_login_attempts - 5))
+        )
+        if user.last_failed_login:
+            unlock_time = user.last_failed_login + lockout_duration
+            if datetime.utcnow() < unlock_time:
+                return jsonify({"error": "Account locked. Try again later"}), 429
+        else:
+            user.failed_login_attempts = 0
+
+    if not check_password_hash(user.password_hash, data["password"]):
+        user.failed_login_attempts += 1
+        user.last_failed_login = datetime.utcnow()
+        db.session.commit()
+
+        # Send failed login notification
+        send_email(
+            user.email,
+            "Failed Login Attempt",
+            f"A failed login attempt was made on your account from {request.remote_addr}",
+        )
+
+        current_app.logger.warning(f"Failed login attempt for user: {user.email}")
+        return jsonify({"error": "Invalid credentials"}), 401
+
+    if not user.is_active:
+        return jsonify({"error": "Account is disabled"}), 403
+
     # Reset failed login attempts on successful login
     user.failed_login_attempts = 0
-    user.last_login_at = datetime.utcnow()
+    user.last_login = datetime.utcnow()
     user.last_login_ip = request.remote_addr
 
     # Handle device fingerprint and remember login
@@ -164,23 +421,44 @@ def login():
         user.remember_token = remember_token
 
         if user.trusted_devices is None:
-            user.trusted_devices = {}
+            user.trusted_devices = []
 
-        user.trusted_devices[device_fingerprint] = {
+        # Add device to trusted devices list if not already present
+        device_info = {
             "fingerprint": device_fingerprint,
             "user_agent": request.headers.get("User-Agent", ""),
             "trusted_at": datetime.utcnow().isoformat(),
             "last_used": datetime.utcnow().isoformat(),
         }
 
+        # Remove existing entry for this device if present
+        user.trusted_devices = [
+            d
+            for d in user.trusted_devices
+            if d.get("fingerprint") != device_fingerprint
+        ]
+        # Add the new/updated device info
+        user.trusted_devices.append(device_info)
+
     db.session.commit()
 
-    # Send successful login notification
-    send_email(
-        user.email,
-        "Successful Login",
-        f"Your account was accessed successfully from {request.remote_addr}",
-    )
+    # Send successful login notification (HTML template)
+    try:
+        html_content = render_template(
+            "login_notification.html",
+            username=user.username or user.email.split("@")[0],
+            login_time=datetime.utcnow().strftime("%B %d, %Y at %I:%M %p UTC"),
+            ip_address=request.remote_addr or "Unknown",
+            device=request.headers.get("User-Agent", "Unknown Device")[:50],
+        )
+        send_email(
+            user.email,
+            "STIP - New Login Detected",
+            f"New login to your STIP account at {datetime.utcnow().strftime('%B %d, %Y at %I:%M %p UTC')}",
+            html=html_content,
+        )
+    except Exception as e:
+        current_app.logger.error(f"Failed to send login notification: {str(e)}")
 
     # Create tokens
     access_token = create_access_token(identity=user.id)
@@ -236,14 +514,22 @@ def login_with_device():
     device_fingerprint = get_device_fingerprint()
 
     # Check if device is trusted
-    if not user.trusted_devices or device_fingerprint not in user.trusted_devices:
+    if not user.trusted_devices:
         return jsonify({"error": "Device not trusted"}), 403
 
-    user.last_login_at = datetime.utcnow()
+    # Find device in trusted devices list
+    device_found = False
+    for device in user.trusted_devices:
+        if device.get("fingerprint") == device_fingerprint:
+            device_found = True
+            device["last_used"] = datetime.utcnow().isoformat()
+            break
+
+    if not device_found:
+        return jsonify({"error": "Device not trusted"}), 403
+
+    user.last_login = datetime.utcnow()
     user.last_login_ip = request.remote_addr
-    user.trusted_devices[device_fingerprint]["last_used"] = (
-        datetime.utcnow().isoformat()
-    )
     db.session.commit()
 
     access_token = create_access_token(identity=user.id)
@@ -287,7 +573,7 @@ def biometric_auth():
     if not user.trusted_devices or device_fingerprint not in user.trusted_devices:
         return jsonify({"error": "Device not trusted"}), 403
 
-    user.last_login_at = datetime.utcnow()
+    user.last_login = datetime.utcnow()
     user.last_login_ip = request.remote_addr
     db.session.commit()
 
@@ -323,11 +609,21 @@ def logout():
     user = User.query.get(user_id)
 
     if user:
-        send_email(
-            user.email,
-            "Logout Notification",
-            f"Your account was logged out from {request.remote_addr}",
-        )
+        try:
+            html_content = render_template(
+                "logout_notification.html",
+                username=user.username or user.email.split("@")[0],
+                logout_time=datetime.utcnow().strftime("%B %d, %Y at %I:%M %p UTC"),
+                ip_address=request.remote_addr or "Unknown",
+            )
+            send_email(
+                user.email,
+                "STIP - Logout Notification",
+                f"Your account was logged out from {request.remote_addr}",
+                html=html_content,
+            )
+        except Exception as e:
+            current_app.logger.error(f"Failed to send logout notification: {str(e)}")
         current_app.logger.info(f"User logout: {user.email}")
 
     return jsonify({"message": "Logout successful"}), 200
@@ -400,14 +696,81 @@ def password_reset():
 
 @auth_bp.route("/admin/login", methods=["POST", "OPTIONS"])
 def admin_login():
-    """Admin login with MFA support"""
+    """Admin login with Firebase Authentication"""
     # Handle CORS preflight
     if request.method == "OPTIONS":
         return "", 200
 
     try:
         data = request.get_json()
+        current_app.logger.info(f"🔐 Admin login attempt received")
+        current_app.logger.info(
+            f"Request data keys: {list(data.keys()) if data else 'None'}"
+        )
 
+        # Check if Firebase ID token is provided (client-side auth)
+        if data.get("firebase_token"):
+            current_app.logger.info("🎫 Firebase token received, verifying...")
+            current_app.logger.info(f"Token preview: {data['firebase_token'][:50]}...")
+            # Verify Firebase token
+            decoded_token = verify_firebase_token(data["firebase_token"])
+
+            if not decoded_token:
+                current_app.logger.error("❌ Firebase token verification failed")
+                return jsonify({"error": "Invalid Firebase token"}), 401
+
+            current_app.logger.info(f"✅ Firebase token verified successfully")
+            current_app.logger.info(f"Decoded token UID: {decoded_token.get('uid')}")
+            current_app.logger.info(
+                f"Decoded token email: {decoded_token.get('email')}"
+            )
+
+            email = decoded_token.get("email")
+
+            # Check if admin exists in database
+            current_app.logger.info(f"🔍 Searching for admin in database: {email}")
+            admin = AdminUser.query.filter_by(email=email).first()
+
+            if not admin:
+                current_app.logger.error(f"❌ Admin not found in database: {email}")
+                return jsonify({"error": "Admin not found"}), 404
+
+            current_app.logger.info(
+                f"✅ Admin found: {admin.email} (ID: {admin.id})"
+            )  # Update last login
+            current_app.logger.info("💾 Updating admin session...")
+            admin.failed_login_attempts = 0
+            admin.last_login_at = datetime.utcnow()
+            admin.session_token = secrets.token_urlsafe(32)
+            admin.session_expires = datetime.utcnow() + timedelta(minutes=15)
+            db.session.commit()
+            current_app.logger.info("✅ Admin session updated")
+
+            current_app.logger.info("🎫 Creating JWT tokens...")
+            access_token = create_access_token(identity=admin.id)
+            refresh_token = create_refresh_token(identity=admin.id)
+            current_app.logger.info("✅ JWT tokens created")
+
+            current_app.logger.info(
+                f"✅ Admin login via Firebase successful: {admin.email}"
+            )
+
+            return jsonify(
+                {
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                    "session_token": admin.session_token,
+                    "admin": {
+                        "id": admin.id,
+                        "email": admin.email,
+                        "username": admin.username
+                        if hasattr(admin, "username")
+                        else admin.email,
+                    },
+                }
+            ), 200
+
+        # Fallback to email/password (for backward compatibility)
         if not data or not data.get("email") or not data.get("password"):
             return jsonify({"error": "Missing email or password"}), 400
 
@@ -426,23 +789,39 @@ def admin_login():
             current_app.logger.warning(f"Failed login attempt for {admin.email}")
             return jsonify({"error": "Invalid credentials"}), 401
 
-        # If MFA is enabled, send code instead of token
+        # Check if MFA is enabled, send email code
         if admin.mfa_enabled:
+            current_app.logger.info(
+                f"🔐 MFA enabled for {admin.email}, generating code..."
+            )
             mfa_code = secrets.randbelow(1000000)
             admin.mfa_temp_code = str(mfa_code).zfill(6)
             admin.mfa_code_expiry = datetime.utcnow() + timedelta(minutes=5)
             db.session.commit()
 
-            # Log MFA code for development purposes
+            # Log MFA code for development
             current_app.logger.info(
                 f"🔐 MFA Code Generated for {admin.email}: {admin.mfa_temp_code}"
             )
 
+            # Send email with code
+            html_content = render_template(
+                "otp_email.html",
+                username=admin.email.split("@")[0],
+                otp_code=admin.mfa_temp_code,
+                expiry_minutes=5,
+            )
             send_email(
-                admin.email, "STIP Admin - MFA Code", f"Your MFA code is: {mfa_code}"
+                admin.email,
+                "STIP - Your Verification Code",
+                f"Your verification code is: {admin.mfa_temp_code}\n\nThis code will expire in 5 minutes.",
+                html=html_content,
             )
 
-            return jsonify({"message": "MFA code sent", "mfa_required": True}), 200
+            current_app.logger.info(f"✅ MFA code sent to {admin.email}")
+            return jsonify(
+                {"message": "MFA code sent to email", "mfa_required": True}
+            ), 200
 
         # No MFA, issue tokens directly
         admin.failed_login_attempts = 0
@@ -472,7 +851,10 @@ def admin_login():
         ), 200
 
     except Exception as e:
-        current_app.logger.error(f"Error in admin login: {str(e)}")
+        current_app.logger.error(f"❌ Error in admin login: {str(e)}")
+        import traceback
+
+        current_app.logger.error(f"Full traceback:\n{traceback.format_exc()}")
         return jsonify({"error": "Login failed"}), 500
 
 
@@ -516,6 +898,24 @@ def admin_mfa_verify():
         db.session.commit()
 
         access_token = create_access_token(identity=admin.id)
+
+        # Send login notification email
+        try:
+            html_content = render_template(
+                "login_notification.html",
+                username=admin.email.split("@")[0],
+                login_time=datetime.utcnow().strftime("%B %d, %Y at %I:%M %p UTC"),
+                ip_address=request.remote_addr or "Unknown",
+                device=request.headers.get("User-Agent", "Unknown Device")[:50],
+            )
+            send_email(
+                admin.email,
+                "STIP - New Login Detected",
+                f"New login to your STIP account at {datetime.utcnow().strftime('%B %d, %Y at %I:%M %p UTC')}",
+                html=html_content,
+            )
+        except Exception as e:
+            current_app.logger.error(f"Failed to send login notification: {str(e)}")
 
         current_app.logger.info(f"✅ Admin MFA verified: {admin.email}")
 

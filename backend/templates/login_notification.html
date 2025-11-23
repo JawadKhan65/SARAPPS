@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login Notification</title>
+    <style type="text/css">
+        body {
+            margin: 0;
+            padding: 0;
+            width: 100% !important;
+            -webkit-text-size-adjust: 100%;
+            -ms-text-size-adjust: 100%;
+            background-color: #0f172a; 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        table { 
+            border-collapse: collapse;
+            mso-table-lspace: 0pt;
+            mso-table-rspace: 0pt;
+        }
+        td, p, h1 {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        p {
+            line-height: 1.6;
+            font-size: 16px;
+        }
+        @media only screen and (max-width: 600px) {
+            .wrapper { width: 100% !important; min-width: 320px !important; }
+            .content { padding: 30px !important; }
+            .info-box { padding: 20px !important; }
+        }
+    </style>
+</head>
+<body style="margin: 0; padding: 0; background-color: #0f172a;">
+    
+    <!-- Preheader Text -->
+    <span style="display: none !important; visibility: hidden; mso-hide: all; font-size: 1px; color: #0f172a; line-height: 1px; max-height: 0px; max-width: 0px; opacity: 0; overflow: hidden;">
+        New login detected on your STIP account from {{ ip_address }} at {{ login_time }}.
+    </span>
+
+    <table width="100%" border="0" cellpadding="0" cellspacing="0" role="presentation" style="background-color: #0f172a;">
+        <tr>
+            <td align="center" style="padding: 40px 10px;">
+                
+                <table class="wrapper" width="600" border="0" cellpadding="0" cellspacing="0" role="presentation" style="width: 600px; background-color: #1e293b; border-radius: 16px; border: 1px solid #334155;">
+                    
+                    <!-- Logo -->
+                    <tr>
+                        <td align="center" style="padding: 48px 40px 24px 40px;">
+                            <img src="cid:stip_logo" alt="STIP Logo" width="120" style="display: block; margin: 0 auto; border-radius: 8px;">
+                            <h2 style="margin: 16px 0 0 0; font-size: 28px; font-weight: 700; color: #f1f5f9;">STIP</h2>
+                        </td>
+                    </tr>
+
+                    
+
+                    <!-- Main Content -->
+                    <tr>
+                        <td class="content" style="padding: 0 40px 40px 40px;">
+                            
+                            <h1 style="font-size: 32px; font-weight: 700; color: #f1f5f9; margin: 0 0 12px 0; text-align: center; letter-spacing: -0.5px;">Successful Login</h1>
+                            
+                            <p style="font-size: 16px; line-height: 1.6; color: #94a3b8; margin: 0 0 32px 0; text-align: center;">
+                                A new login was detected on your STIP account
+                            </p>
+
+                            <!-- Login Details Card -->
+                            <table width="100%" border="0" cellpadding="0" cellspacing="0" role="presentation" style="background: linear-gradient(135deg, #1e293b 0%, #334155 100%); border-radius: 16px; border: 1px solid #475569; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">
+                                <tr>
+                                    <td class="info-box" style="padding: 32px;">
+                                        
+                                        <!-- User Info -->
+                                        <table width="100%" border="0" cellpadding="0" cellspacing="0" style="margin-bottom: 24px;">
+                                            <tr>
+                                                <td style="padding: 0 0 16px 0; border-bottom: 2px solid #475569;">
+                                                    <p style="font-size: 12px; color: #64748b; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 1px; font-weight: 600;">Account</p>
+                                                    <p style="font-size: 18px; color: #f1f5f9; margin: 0; font-weight: 600;">{{ username }}</p>
+                                                </td>
+                                            </tr>
+                                        </table>
+
+                                        <!-- Session Details -->
+                                        <table width="100%" border="0" cellpadding="0" cellspacing="0">
+                                            <tr>
+                                                <td style="padding: 12px 0;">
+                                                    <table width="100%" border="0" cellpadding="0" cellspacing="0">
+                                                        <tr>
+                                                            <td width="40" style="vertical-align: middle; padding-right: 12px;">
+                                                                <table border="0" cellpadding="0" cellspacing="0" style="background: #3b82f6; border-radius: 8px; width: 32px; height: 32px;">
+                                                                    <tr>
+                                                                        <td align="center" style="vertical-align: middle;">
+                                                                            <span style="font-size: 16px;">📅</span>
+                                                                        </td>
+                                                                    </tr>
+                                                                </table>
+                                                            </td>
+                                                            <td style="vertical-align: middle;">
+                                                                <p style="font-size: 13px; color: #94a3b8; margin: 0 0 4px 0;">Date & Time</p>
+                                                                <p style="font-size: 16px; color: #f1f5f9; margin: 0; font-weight: 600;">{{ login_time }}</p>
+                                                            </td>
+                                                        </tr>
+                                                    </table>
+                                                </td>
+                                            </tr>
+                                            
+                                            <tr>
+                                                <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                                                    <table width="100%" border="0" cellpadding="0" cellspacing="0">
+                                                        <tr>
+                                                            <td width="40" style="vertical-align: middle; padding-right: 12px;">
+                                                                <table border="0" cellpadding="0" cellspacing="0" style="background: #8b5cf6; border-radius: 8px; width: 32px; height: 32px;">
+                                                                    <tr>
+                                                                        <td align="center" style="vertical-align: middle;">
+                                                                            <span style="font-size: 16px;">🌐</span>
+                                                                        </td>
+                                                                    </tr>
+                                                                </table>
+                                                            </td>
+                                                            <td style="vertical-align: middle;">
+                                                                <p style="font-size: 13px; color: #94a3b8; margin: 0 0 4px 0;">IP Address</p>
+                                                                <p style="font-size: 16px; color: #f1f5f9; margin: 0; font-weight: 600; font-family: 'Courier New', monospace;">{{ ip_address }}</p>
+                                                            </td>
+                                                        </tr>
+                                                    </table>
+                                                </td>
+                                            </tr>
+                                            
+                                            <tr>
+                                                <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                                                    <table width="100%" border="0" cellpadding="0" cellspacing="0">
+                                                        <tr>
+                                                            <td width="40" style="vertical-align: middle; padding-right: 12px;">
+                                                                <table border="0" cellpadding="0" cellspacing="0" style="background: #06b6d4; border-radius: 8px; width: 32px; height: 32px;">
+                                                                    <tr>
+                                                                        <td align="center" style="vertical-align: middle;">
+                                                                            <span style="font-size: 16px;">💻</span>
+                                                                        </td>
+                                                                    </tr>
+                                                                </table>
+                                                            </td>
+                                                            <td style="vertical-align: middle;">
+                                                                <p style="font-size: 13px; color: #94a3b8; margin: 0 0 4px 0;">Device / Browser</p>
+                                                                <p style="font-size: 14px; color: #cbd5e1; margin: 0; line-height: 1.4;">{{ device }}</p>
+                                                            </td>
+                                                        </tr>
+                                                    </table>
+                                                </td>
+                                            </tr>
+                                        </table>
+                                        
+                                    </td>
+                                </tr>
+                            </table>
+
+                            <!-- Security Alert -->
+                            <table width="100%" border="0" cellpadding="0" cellspacing="0" role="presentation" style="background-color: #7f1d1d; border-radius: 12px; border-left: 4px solid #ef4444; margin-top: 24px;">
+                                <tr>
+                                    <td style="padding: 20px 24px;">
+                                        <table width="100%" border="0" cellpadding="0" cellspacing="0">
+                                            <tr>
+                                                <td width="40" style="vertical-align: top;">
+                                                    <span style="font-size: 28px;">⚠️</span>
+                                                </td>
+                                                <td style="vertical-align: top;">
+                                                    <p style="font-size: 15px; line-height: 1.5; color: #fca5a5; margin: 0 0 8px 0; font-weight: 700;">
+                                                        Wasn't You?
+                                                    </p>
+                                                    <p style="font-size: 14px; line-height: 1.6; color: #fecaca; margin: 0;">
+                                                        If you didn't initiate this login, your account may be compromised. <strong style="color: #ffffff;">Secure your account immediately</strong> by changing your password and enabling two-factor authentication.
+                                                    </p>
+                                                </td>
+                                            </tr>
+                                        </table>
+                                    </td>
+                                </tr>
+                            </table>
+
+                            <!-- Help Section -->
+                            <table width="100%" border="0" cellpadding="0" cellspacing="0" role="presentation" style="background-color: #1e3a5f; border-radius: 12px; border-left: 4px solid #3b82f6; margin-top: 16px;">
+                                <tr>
+                                    <td style="padding: 16px 24px;">
+                                        <p style="font-size: 13px; line-height: 1.5; color: #93c5fd; margin: 0;">
+                                            <strong>💡 Security Tip:</strong> Always log out from shared devices and avoid accessing your account on public Wi-Fi networks without a VPN.
+                                        </p>
+                                    </td>
+                                </tr>
+                            </table>
+                            
+                        </td>
+                    </tr>
+
+                    <!-- Footer -->
+                    <tr>
+                        <td align="center" style="padding: 32px 40px; border-top: 1px solid #334155; background-color: #0f172a; border-radius: 0 0 16px 16px;">
+                            <p style="font-size: 12px; line-height: 1.5; color: #64748b; margin: 0;">
+                                &copy; 2025 STIP - Shoe Type Identification System. All rights reserved.
+                            </p>
+                        </td>
+                    </tr>
+
+                </table>
+
+            </td>
+        </tr>
+    </table>
+
+</body>
+</html>

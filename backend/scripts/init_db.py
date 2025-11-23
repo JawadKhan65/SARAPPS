@@ -179,9 +179,9 @@ def create_sample_crawlers():
     try:
         crawlers = [
             {
-                "name": "Zappos", 
-                "url": "https://www.zappos.com/men-shoes/.zso?t=men%20shoes", 
-                "module": "zappos"
+                "name": "Zappos",
+                "url": "https://www.zappos.com/men-shoes/.zso?t=men%20shoes",
+                "module": "zappos",
             },
             {
                 "name": "Amazon Shoes",
@@ -204,9 +204,9 @@ def create_sample_crawlers():
                 "module": "canterbury",
             },
             {
-                "name": "Clarks", 
-                "url": "https://www.clarks.com/en-gb/mens/mens-boots/m_boots_uk-c", 
-                "module": "clarks"
+                "name": "Clarks",
+                "url": "https://www.clarks.com/en-gb/mens/mens-boots/m_boots_uk-c",
+                "module": "clarks",
             },
             {
                 "name": "Crockett & Jones Men",
@@ -222,11 +222,6 @@ def create_sample_crawlers():
                 "name": "Decathlon",
                 "url": "https://www.decathlon.com/collections/footwear",
                 "module": "decathlon",
-            },
-            {
-                "name": "Footlocker",
-                "url": "https://www.footlocker.com",
-                "module": "footlocker",
             },
             {
                 "name": "Givenchy",
@@ -258,7 +253,6 @@ def create_sample_crawlers():
                     website_url=crawler_data["url"],
                     scraper_module=crawler_data.get("module"),
                     is_active=True,
-                    schedule_cron="0 2 1 */3 *",  # Every 3 months (quarterly) at 2 AM on 1st day
                 )
                 db.session.add(crawler)
 

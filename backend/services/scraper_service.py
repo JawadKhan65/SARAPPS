@@ -8,15 +8,17 @@ from extensions import db
 from models import SoleImage, Crawler, CrawlerStatistics
 from services.image_processor import ImageProcessor
 import hashlib
+import numpy as np
 
 # Add line_tracing module to path
 line_tracing_path = os.path.join(os.path.dirname(__file__), "..", "line_tracing_utils")
 sys.path.insert(0, line_tracing_path)
 
 try:
-    from line_tracing import compare_sole_images
+    from line_tracing import compare_sole_images, process_reference_sole
 except ImportError:
     compare_sole_images = None
+    process_reference_sole = None
 
 
 class ScraperService:
@@ -121,6 +123,7 @@ class ScraperService:
                     # In-memory processing - convert bytes to PIL Image
                     from PIL import Image
                     import io
+                    import cv2 as cv
 
                     # Store original image bytes
                     original_image_bytes = product["image_bytes"]
@@ -130,19 +133,47 @@ class ScraperService:
                     # Detect image format
                     image_format = image_pil.format or "PNG"
 
-                    process_result = self.processor.process_image(
-                        image_pil, save_processed_path=processed_path
-                    )
+                    # Convert PIL to OpenCV format (grayscale)
+                    img_array = np.array(image_pil.convert("L"))
 
-                    # Convert processed image to bytes for database storage
-                    if process_result.get("processed_image"):
-                        processed_img = process_result["processed_image"]
-                        processed_buffer = io.BytesIO()
-                        processed_img.save(processed_buffer, format=image_format)
-                        processed_image_bytes = processed_buffer.getvalue()
+                    # Use process_reference_sole for rotation-robust processing
+                    if process_reference_sole:
+                        processed_matrix = process_reference_sole(
+                            img_array,
+                            target_size=(512, 512),
+                            keep_aspect=True,
+                            use_polar=True,
+                            debug=False,
+                        )
+
+                        # Convert processed matrix to bytes (no file write)
+                        _, buffer = cv.imencode(".png", processed_matrix)
+                        processed_image_bytes = buffer.tobytes()
+
+                        # Create process_result structure for compatibility
+                        process_result = {
+                            "image_array": processed_matrix,
+                            "features": {},  # We'll use processed_matrix directly for matching
+                            "quality_score": 0.8,  # Default quality
+                            "processed_image": None,
+                        }
+                    else:
+                        # Fallback to old processor
+                        process_result = self.processor.process_image(
+                            image_pil, save_processed_path=processed_path
+                        )
+
+                        # Convert processed image to bytes for database storage
+                        if process_result.get("processed_image"):
+                            processed_img = process_result["processed_image"]
+                            processed_buffer = io.BytesIO()
+                            processed_img.save(processed_buffer, format=image_format)
+                            processed_image_bytes = processed_buffer.getvalue()
 
                 else:
                     # File-based processing (legacy)
+                    import cv2 as cv
+
                     if not os.path.exists(product["image_path"]):
                         result["errors"] += 1
                         result["error_details"].append(
@@ -154,14 +185,40 @@ class ScraperService:
                     with open(product["image_path"], "rb") as f:
                         original_image_bytes = f.read()
 
-                    process_result = self.processor.process_image(
-                        product["image_path"], save_processed_path=processed_path
-                    )
+                    # Read image as grayscale
+                    img = cv.imread(product["image_path"], cv.IMREAD_GRAYSCALE)
 
-                    # Load processed image into bytes
-                    if os.path.exists(processed_path):
-                        with open(processed_path, "rb") as f:
-                            processed_image_bytes = f.read()
+                    # Use process_reference_sole for rotation-robust processing
+                    if process_reference_sole:
+                        processed_matrix = process_reference_sole(
+                            img,
+                            target_size=(512, 512),
+                            keep_aspect=True,
+                            use_polar=True,
+                            debug=False,
+                        )
+
+                        # Convert processed matrix to bytes (no file write)
+                        _, buffer = cv.imencode(".png", processed_matrix)
+                        processed_image_bytes = buffer.tobytes()
+
+                        # Create process_result structure for compatibility
+                        process_result = {
+                            "image_array": processed_matrix,
+                            "features": {},  # We'll use processed_matrix directly for matching
+                            "quality_score": 0.8,  # Default quality
+                            "processed_image": None,
+                        }
+                    else:
+                        # Fallback to old processor
+                        process_result = self.processor.process_image(
+                            product["image_path"], save_processed_path=processed_path
+                        )
+
+                        # Load processed image into bytes
+                        if os.path.exists(processed_path):
+                            with open(processed_path, "rb") as f:
+                                processed_image_bytes = f.read()
 
                 # Calculate image hash
                 image_hash = self.calculate_image_hash(process_result["image_array"])

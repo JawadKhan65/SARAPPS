@@ -1,8 +1,9 @@
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, jsonify, current_app, render_template
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime
-from extensions import db
+from extensions import db, mail
+from flask_mail import Message
 from models import AdminUser, User, CrawlerStatistics, SystemConfig, Crawler, UserGroup
 from services.scraper_manager import get_scraper_manager, cleanup_scraper_manager
 from utils.schedule_helper import (
@@ -13,8 +14,55 @@ from utils.schedule_helper import (
 )
 import asyncio
 import uuid
+import os
 
 admin_bp = Blueprint("admin", __name__)
+
+
+def send_email(recipient, subject, body, html=None):
+    """Send email notification"""
+    try:
+        msg = Message(subject=subject, recipients=[recipient])
+        msg.body = body
+        if html:
+            msg.html = html
+            # Attach inline logo if template references cid:stip_logo
+            try:
+                if "cid:stip_logo" in html:
+                    static_dir = os.path.join(
+                        os.path.dirname(os.path.dirname(__file__)), "static"
+                    )
+                    logo_path_small = os.path.join(static_dir, "logo-small.png")
+                    logo_path = os.path.join(static_dir, "logo.png")
+                    chosen_path = (
+                        logo_path_small
+                        if os.path.isfile(logo_path_small)
+                        else logo_path
+                        if os.path.isfile(logo_path)
+                        else None
+                    )
+                    if chosen_path:
+                        with open(chosen_path, "rb") as f:
+                            img_bytes = f.read()
+                        # Attach as inline with Content-ID matching cid reference
+                        msg.attach(
+                            filename=os.path.basename(chosen_path),
+                            content_type="image/png",
+                            data=img_bytes,
+                            disposition="inline",
+                            headers={"Content-ID": "<stip_logo>"},
+                        )
+                        current_app.logger.info(
+                            f"Attached inline logo for email (size: {len(img_bytes)} bytes)"
+                        )
+            except Exception as attach_err:
+                current_app.logger.error(
+                    f"Failed to attach inline logo: {str(attach_err)}"
+                )
+        mail.send(msg)
+        current_app.logger.info(f"✅ Email sent successfully to {recipient}")
+    except Exception as e:
+        current_app.logger.error(f"❌ Failed to send email to {recipient}: {str(e)}")
 
 
 def get_group_image_url(group):
@@ -76,6 +124,7 @@ def list_users():
                 "email": user.email,
                 "username": user.username,
                 "is_active": user.is_active,
+                "is_deleted": user.is_deleted,
                 "storage_used_mb": user.storage_used_mb,
                 "group": group_info,
                 "created_at": user.created_at.isoformat() if user.created_at else None,
@@ -94,10 +143,10 @@ def list_users():
     ), 200
 
 
-@admin_bp.route("/users/<user_id>/toggle", methods=["PUT"])
+@admin_bp.route("/users/<user_id>/block", methods=["POST"])
 @jwt_required()
-def toggle_user(user_id):
-    """Enable/disable a user account"""
+def block_user(user_id):
+    """Block a user account"""
     admin_id = get_jwt_identity()
     admin = verify_admin_session(admin_id)
 
@@ -109,24 +158,57 @@ def toggle_user(user_id):
     if not user:
         return jsonify({"error": "User not found"}), 404
 
+    if user.is_deleted:
+        return jsonify({"error": "Cannot block a deleted user"}), 400
+
     try:
-        user.is_active = not user.is_active
+        user.is_active = False
         db.session.commit()
 
-        status = "activated" if user.is_active else "deactivated"
-        current_app.logger.info(f"User {status} by admin: {user.email}")
+        current_app.logger.info(f"User blocked by admin: {user.email}")
 
-        return jsonify({"message": f"User {status}", "is_active": user.is_active}), 200
+        return jsonify({"message": "User blocked", "is_active": False}), 200
 
     except Exception as e:
-        current_app.logger.error(f"Error toggling user: {str(e)}")
-        return jsonify({"error": "Failed to toggle user"}), 500
+        current_app.logger.error(f"Error blocking user: {str(e)}")
+        return jsonify({"error": "Failed to block user"}), 500
+
+
+@admin_bp.route("/users/<user_id>/unblock", methods=["POST"])
+@jwt_required()
+def unblock_user(user_id):
+    """Unblock a user account"""
+    admin_id = get_jwt_identity()
+    admin = verify_admin_session(admin_id)
+
+    if not admin:
+        return jsonify({"error": "Session expired"}), 401
+
+    user = User.query.get(user_id)
+
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    if user.is_deleted:
+        return jsonify({"error": "Cannot unblock a deleted user"}), 400
+
+    try:
+        user.is_active = True
+        db.session.commit()
+
+        current_app.logger.info(f"User unblocked by admin: {user.email}")
+
+        return jsonify({"message": "User unblocked", "is_active": True}), 200
+
+    except Exception as e:
+        current_app.logger.error(f"Error unblocking user: {str(e)}")
+        return jsonify({"error": "Failed to unblock user"}), 500
 
 
 @admin_bp.route("/users/<user_id>", methods=["DELETE"])
 @jwt_required()
 def delete_user(user_id):
-    """Delete a user account"""
+    """Permanently delete a user account"""
     admin_id = get_jwt_identity()
     admin = verify_admin_session(admin_id)
 
@@ -142,7 +224,9 @@ def delete_user(user_id):
         import os
         from models import UploadedImage, MatchResult
 
-        # Delete user's uploaded images
+        user_email = user.email
+
+        # Delete user's uploaded images from filesystem
         uploaded_images = UploadedImage.query.filter_by(user_id=user_id).all()
 
         for img in uploaded_images:
@@ -151,23 +235,122 @@ def delete_user(user_id):
             if img.processed_image_path and os.path.exists(img.processed_image_path):
                 os.remove(img.processed_image_path)
 
-        # Delete match results and uploaded images
+        # Delete match results and uploaded images from database
         MatchResult.query.filter_by(user_id=user_id).delete()
         UploadedImage.query.filter_by(user_id=user_id).delete()
 
-        # Mark user as deleted
-        user.is_deleted = True
-        user.is_active = False
+        # Permanently delete user from database
+        db.session.delete(user)
 
         db.session.commit()
 
-        current_app.logger.info(f"User deleted by admin: {user.email}")
+        current_app.logger.info(f"User permanently deleted by admin: {user_email}")
 
-        return jsonify({"message": "User deleted"}), 200
+        return jsonify({"message": "User permanently deleted"}), 200
 
     except Exception as e:
+        db.session.rollback()
         current_app.logger.error(f"Error deleting user: {str(e)}")
         return jsonify({"error": "Failed to delete user"}), 500
+
+
+@admin_bp.route("/users/<user_id>/password", methods=["PUT"])
+@jwt_required()
+def change_user_password(user_id):
+    """Change a user's password (admin only)"""
+    admin_id = get_jwt_identity()
+    admin = verify_admin_session(admin_id)
+
+    if not admin:
+        return jsonify({"error": "Session expired"}), 401
+
+    user = User.query.get(user_id)
+
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    if user.is_deleted:
+        return jsonify({"error": "Cannot change password for deleted user"}), 400
+
+    data = request.get_json()
+    new_password = data.get("new_password")
+
+    if not new_password:
+        return jsonify({"error": "New password is required"}), 400
+
+    if len(new_password) < 8:
+        return jsonify({"error": "Password must be at least 8 characters"}), 400
+
+    try:
+        user.password_hash = generate_password_hash(new_password)
+        db.session.commit()
+
+        current_app.logger.info(
+            f"Admin {admin.email} changed password for user {user.email}"
+        )
+
+        return jsonify({"message": "Password changed successfully"}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"Error changing user password: {str(e)}")
+        return jsonify({"error": "Failed to change password"}), 500
+
+
+@admin_bp.route("/users/<user_id>", methods=["PUT", "PATCH"])
+@jwt_required()
+def update_user(user_id):
+    """Update user information (admin only)"""
+    admin_id = get_jwt_identity()
+    admin = verify_admin_session(admin_id)
+
+    if not admin:
+        return jsonify({"error": "Session expired"}), 401
+
+    user = User.query.get(user_id)
+
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    if user.is_deleted:
+        return jsonify({"error": "Cannot update deleted user"}), 400
+
+    data = request.get_json()
+
+    try:
+        # Update group if provided
+        if "group_id" in data:
+            group_id = data.get("group_id")
+            if group_id:
+                # Verify group exists
+                group = UserGroup.query.get(group_id)
+                if not group:
+                    return jsonify({"error": "Group not found"}), 404
+                user.group_id = group_id
+            else:
+                # Allow removing group by setting to None
+                user.group_id = None
+
+        db.session.commit()
+
+        current_app.logger.info(f"Admin {admin.email} updated user {user.email}")
+
+        return jsonify(
+            {
+                "message": "User updated successfully",
+                "user": {
+                    "id": user.id,
+                    "email": user.email,
+                    "username": user.username,
+                    "group_id": user.group_id,
+                },
+            }
+        ), 200
+
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"Error updating user: {str(e)}")
+        return jsonify({"error": "Failed to update user"}), 500
 
 
 @admin_bp.route("/users", methods=["POST", "OPTIONS"])
@@ -216,6 +399,24 @@ def create_user():
         db.session.commit()
 
         current_app.logger.info(f"User created by admin: {new_user.email}")
+
+        # Send welcome email with credentials
+        try:
+            html_content = render_template(
+                "welcome_user_email.html",
+                username=new_user.username,
+                email=new_user.email,
+                password=data["password"],  # Send plain password in welcome email
+            )
+            send_email(
+                new_user.email,
+                "STIP - Welcome! Your Account Credentials",
+                f"Welcome to STIP! Your account has been created.\n\nEmail: {new_user.email}\nPassword: {data['password']}\n\nPlease change your password after first login.",
+                html=html_content,
+            )
+            current_app.logger.info(f"✅ Welcome email sent to {new_user.email}")
+        except Exception as e:
+            current_app.logger.error(f"Failed to send welcome email: {str(e)}")
 
         # Get profile image from group if assigned
         profile_image_url = None
@@ -803,8 +1004,25 @@ def get_dashboard_stats():
             current_app.logger.warning(f"Could not get DB size: {e}")
             db_size_mb = 0.0
 
-        # Cache hit rate placeholder (would need Redis/memcached integration)
-        cache_hit_rate = 0.85  # Placeholder: 85% hit rate
+        # Get actual cache hit rate from Redis if available
+        cache_hit_rate = 0.0
+        try:
+            import redis
+
+            redis_client = redis.from_url(
+                current_app.config.get("REDIS_URL", "redis://localhost:6379/0")
+            )
+            info = redis_client.info("stats")
+
+            keyspace_hits = info.get("keyspace_hits", 0)
+            keyspace_misses = info.get("keyspace_misses", 0)
+
+            total_requests = keyspace_hits + keyspace_misses
+            if total_requests > 0:
+                cache_hit_rate = keyspace_hits / total_requests
+        except Exception as e:
+            current_app.logger.debug(f"Could not get Redis cache stats: {e}")
+            cache_hit_rate = 0.0
 
         return jsonify(
             {
@@ -875,15 +1093,41 @@ def get_match_stats():
 
     try:
         from models import MatchResult
-        from sqlalchemy import func
 
         total_matches = MatchResult.query.count()
-        avg_confidence = (
-            db.session.query(func.avg(MatchResult.overall_similarity)).scalar() or 0
-        )
-        perfect_matches = MatchResult.query.filter(
-            MatchResult.overall_similarity >= 0.95
-        ).count()
+
+        # Calculate average confidence dynamically from all confidence scores
+        if total_matches > 0:
+            all_matches = MatchResult.query.all()
+            total_confidence = 0
+            total_scores = 0
+            perfect_count = 0
+
+            for match in all_matches:
+                scores = []
+                if match.primary_confidence and match.primary_confidence > 0:
+                    scores.append(match.primary_confidence)
+                if match.secondary_confidence and match.secondary_confidence > 0:
+                    scores.append(match.secondary_confidence)
+                if match.tertiary_confidence and match.tertiary_confidence > 0:
+                    scores.append(match.tertiary_confidence)
+                if match.quaternary_confidence and match.quaternary_confidence > 0:
+                    scores.append(match.quaternary_confidence)
+
+                if scores:
+                    match_avg = sum(scores) / len(scores)
+                    total_confidence += match_avg
+                    total_scores += 1
+
+                    # Count as perfect if average is >= 0.95
+                    if match_avg >= 0.95:
+                        perfect_count += 1
+
+            avg_confidence = total_confidence / total_scores if total_scores > 0 else 0
+            perfect_matches = perfect_count
+        else:
+            avg_confidence = 0
+            perfect_matches = 0
 
         return jsonify(
             {
@@ -912,16 +1156,39 @@ def get_crawler_stats():
         return jsonify({"error": "Session expired"}), 401
 
     try:
-        from models import SoleImage
+        from models import SoleImage, CrawlerRun
 
         total_items = SoleImage.query.count()
         active_crawlers = Crawler.query.filter_by(is_active=True).count()
         running_crawlers = Crawler.query.filter_by(is_running=True).count()
 
-        # Calculate success rate
-        total_crawlers = Crawler.query.count()
-        successful = Crawler.query.filter(Crawler.items_scraped > 0).count()
-        success_rate = (successful / total_crawlers) if total_crawlers > 0 else 0
+        # Calculate success rate based on crawler runs
+        total_runs = CrawlerRun.query.count()
+        successful_runs = CrawlerRun.query.filter_by(status="completed").count()
+
+        if total_runs > 0:
+            success_rate = successful_runs / total_runs
+        else:
+            # Fallback: count crawlers that have scraped items
+            total_crawlers = Crawler.query.count()
+            successful = Crawler.query.filter(Crawler.items_scraped > 0).count()
+            success_rate = (successful / total_crawlers) if total_crawlers > 0 else 0
+
+        # Get total unique images added
+        unique_images = (
+            db.session.query(db.func.sum(Crawler.unique_images_added)).scalar() or 0
+        )
+
+        # Calculate average uniqueness percentage
+        crawlers_with_data = Crawler.query.filter(Crawler.items_scraped > 0).all()
+        if crawlers_with_data:
+            avg_uniqueness = sum(
+                (c.unique_images_added / c.items_scraped * 100)
+                for c in crawlers_with_data
+                if c.items_scraped > 0
+            ) / len(crawlers_with_data)
+        else:
+            avg_uniqueness = 0
 
         return jsonify(
             {
@@ -929,6 +1196,10 @@ def get_crawler_stats():
                 "active_crawlers": active_crawlers,
                 "running_crawlers": running_crawlers,
                 "success_rate": success_rate,
+                "total_runs": total_runs,
+                "successful_runs": successful_runs,
+                "unique_images": int(unique_images),
+                "avg_uniqueness": round(avg_uniqueness, 2),
             }
         ), 200
 
@@ -1439,7 +1710,7 @@ def change_admin_password():
 
         # Validate new password length
         config = SystemConfig.query.first()
-        min_length = config.password_min_length if config else 15
+        min_length = config.password_min_length if config else 9
 
         if len(new_password) < min_length:
             return jsonify(

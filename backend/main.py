@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import os
+import cv2 as cv
 
 # Load data/info.json into `info` with safe error handling.
 DATA_INFO_PATH = Path(__file__).parent / "data" / "info.json"
@@ -48,7 +49,11 @@ def compute_score(target):
             candidate_path = Path(__file__).parent / data_url
 
         try:
-            score = compare_sole_images(str(candidate_path), str(target), debug=False)
+            img1 = cv.imread(str(candidate_path))
+           
+            img2 = cv.imread(target)
+          
+            score = compare_sole_images(img2, img1, debug=False)
         except Exception as exc:
             # If an error occurs comparing this pair, skip and log
             print(f"Error comparing {candidate_path} to {target}: {exc}")

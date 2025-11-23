@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Welcome to STIP</title>
+    <style type="text/css">
+        body {
+            margin: 0;
+            padding: 0;
+            width: 100% !important;
+            -webkit-text-size-adjust: 100%;
+            -ms-text-size-adjust: 100%;
+            background-color: #0f172a; 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        table {
+            border-collapse: collapse;
+            mso-table-lspace: 0pt;
+            mso-table-rspace: 0pt;
+        }
+        td, p, h1 {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        p {
+            line-height: 1.6;
+            font-size: 16px;
+        }
+        @media only screen and (max-width: 600px) {
+            .wrapper {
+                width: 100% !important;
+                min-width: 320px !important;
+            }
+            .content {
+                padding: 30px !important;
+            }
+        }
+    </style>
+</head>
+<body style="margin: 0; padding: 0; background-color: #0f172a;">
+    
+    <span style="display: none !important; visibility: hidden; mso-hide: all; font-size: 1px; color: #0f172a; line-height: 1px; max-height: 0px; max-width: 0px; opacity: 0; overflow: hidden;">
+        Your STIP account has been created. Login credentials inside.
+    </span>
+
+    <table width="100%" border="0" cellpadding="0" cellspacing="0" role="presentation" style="background-color: #0f172a;">
+        <tr>
+            <td align="center" style="padding: 40px 10px;">
+                
+                <table class="wrapper" width="600" border="0" cellpadding="0" cellspacing="0" role="presentation" style="width: 600px; background-color: #1e293b; border-radius: 16px; border: 1px solid #334155;">
+                    
+                    <!-- Logo Section -->
+                    <tr>
+                        <td align="center" style="padding: 48px 40px 24px 40px;">
+                            <img src="cid:stip_logo" alt="STIP Logo" width="120" style="display: block; margin: 0 auto; border-radius: 8px;">
+                            <h2 style="margin: 16px 0 0 0; font-size: 28px; font-weight: 700; color: #f1f5f9;">STIP</h2>
+                            <p style="margin: 4px 0 0 0; font-size: 14px; color: #94a3b8;">Shoe Type Identification System</p>
+                        </td>
+                    </tr>
+
+                    <!-- Welcome Icon -->
+                    <tr>
+                        <td align="center" style="padding: 16px 40px;">
+                            <div style="width: 80px; height: 80px; background: linear-gradient(135deg, #10b981 0%, #059669 100%); border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;">
+                                <span style="font-size: 40px;">🎉</span>
+                            </div>
+                        </td>
+                    </tr>
+
+                    <!-- Main Content -->
+                    <tr>
+                        <td class="content" align="left" style="padding: 16px 40px 40px 40px;">
+                            
+                            <h1 style="font-size: 28px; font-weight: 700; color: #f1f5f9; margin: 0 0 16px 0; text-align: center;">Welcome to STIP!</h1>
+                            
+                            <p style="font-size: 16px; line-height: 1.6; color: #cbd5e1; margin: 0 0 24px 0; text-align: center;">
+                                Hi <strong style="color: #f1f5f9;">{{ username }}</strong>,
+                            </p>
+                            
+                            <p style="font-size: 16px; line-height: 1.6; color: #cbd5e1; margin: 0 0 32px 0; text-align: center;">
+                                Your account has been created successfully. Below are your login credentials to access the STIP platform.
+                            </p>
+
+                            <!-- Credentials Box -->
+                            <table width="100%" border="0" cellpadding="0" cellspacing="0" role="presentation" style="background: linear-gradient(135deg, #1e293b 0%, #334155 100%); border-radius: 12px; border: 2px solid #475569; margin-bottom: 32px;">
+                                <tr>
+                                    <td style="padding: 32px 24px;">
+                                        <table width="100%" border="0" cellpadding="0" cellspacing="0" role="presentation">
+                                            <tr>
+                                                <td style="padding-bottom: 20px;">
+                                                    <p style="font-size: 14px; font-weight: 600; color: #94a3b8; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.5px;">
+                                                        📧 Email
+                                                    </p>
+                                                    <p style="font-size: 18px; font-weight: 600; color: #f1f5f9; margin: 0; word-break: break-all;">
+                                                        {{ email }}
+                                                    </p>
+                                                </td>
+                                            </tr>
+                                            <tr>
+                                                <td style="border-top: 1px solid #475569; padding-top: 20px;">
+                                                    <p style="font-size: 14px; font-weight: 600; color: #94a3b8; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.5px;">
+                                                        🔑 Password
+                                                    </p>
+                                                    <p style="font-size: 18px; font-weight: 600; color: #10b981; margin: 0; font-family: 'Courier New', monospace; word-break: break-all;">
+                                                        {{ password }}
+                                                    </p>
+                                                </td>
+                                            </tr>
+                                        </table>
+                                    </td>
+                                </tr>
+                            </table>
+
+                            <!-- Security Notice -->
+                            <table width="100%" border="0" cellpadding="0" cellspacing="0" role="presentation" style="background-color: #334155; border-radius: 12px; border-left: 4px solid #f59e0b; margin-bottom: 24px;">
+                                <tr>
+                                    <td style="padding: 16px 20px;">
+                                        <p style="font-size: 14px; line-height: 1.5; color: #fbbf24; margin: 0 0 8px 0;">
+                                            🔐 <strong>Security Reminder</strong>
+                                        </p>
+                                        <p style="font-size: 14px; line-height: 1.5; color: #cbd5e1; margin: 0;">
+                                            Please change your password after your first login. Keep your credentials secure and never share them with anyone.
+                                        </p>
+                                    </td>
+                                </tr>
+                            </table>
+
+                            <!-- OTP Notice -->
+                            <table width="100%" border="0" cellpadding="0" cellspacing="0" role="presentation" style="background-color: #1e3a8a; border-radius: 12px; border-left: 4px solid #3b82f6; margin-bottom: 24px;">
+                                <tr>
+                                    <td style="padding: 16px 20px;">
+                                        <p style="font-size: 14px; line-height: 1.5; color: #93c5fd; margin: 0 0 8px 0;">
+                                            📱 <strong>Login Process</strong>
+                                        </p>
+                                        <p style="font-size: 14px; line-height: 1.5; color: #dbeafe; margin: 0;">
+                                            When you log in, you'll receive a one-time password (OTP) via email for added security. Check your inbox for the verification code.
+                                        </p>
+                                    </td>
+                                </tr>
+                            </table>
+                            
+                            <p style="font-size: 14px; line-height: 1.5; color: #94a3b8; margin: 0; text-align: center;">
+                                If you have any questions or need assistance, please contact your administrator.
+                            </p>
+                        </td>
+                    </tr>
+
+                    <!-- Footer -->
+                    <tr>
+                        <td class="content" align="center" style="padding: 32px 40px; border-top: 1px solid #334155; background-color: #0f172a; border-radius: 0 0 16px 16px;">
+                            <p style="font-size: 12px; line-height: 1.5; color: #64748b; margin: 0 0 8px 0;">
+                                You received this email because an account was created for you on STIP.
+                            </p>
+                            <p style="font-size: 12px; line-height: 1.5; color: #64748b; margin: 0;">
+                                &copy; 2025 STIP - Shoe Type Identification System. All rights reserved.
+                            </p>
+                        </td>
+                    </tr>
+
+                </table>
+
+            </td>
+        </tr>
+    </table>
+
+</body>
+</html>
