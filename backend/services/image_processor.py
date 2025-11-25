@@ -159,6 +159,86 @@ class ImageProcessor:
 
         return hist_edges
 
+    def _reduce_dimensions(self, features, target_dim):
+        """Reduce feature dimensions to target size using pooling or padding"""
+        if features is None or len(features) == 0:
+            return np.zeros(target_dim, dtype=np.float32)
+        
+        features = np.array(features).flatten()
+        
+        if len(features) == target_dim:
+            return features.astype(np.float32)
+        elif len(features) < target_dim:
+            # Pad with zeros
+            padded = np.zeros(target_dim, dtype=np.float32)
+            padded[:len(features)] = features
+            return padded
+        else:
+            # Pool to target dimension using average pooling
+            pool_size = len(features) // target_dim
+            remainder = len(features) % target_dim
+            
+            # Truncate to make it evenly divisible
+            features_truncated = features[:target_dim * pool_size]
+            pooled = features_truncated.reshape(target_dim, pool_size).mean(axis=1)
+            
+            return pooled.astype(np.float32)
+
+    def extract_vector_embeddings(self, image_array, image_path=None):
+        """
+        Extract vector embeddings for pgvector similarity search
+        Returns dict with clip_vector (512-dim), edge_vector (256-dim), texture_vector (128-dim)
+        """
+        vectors = {}
+        
+        # 1. CLIP embedding (512 dimensions)
+        clip_features = self.extract_clip_features(image_array)
+        if clip_features is not None:
+            # CLIP should already be 512-dim, but ensure it
+            vectors['clip_vector'] = self._reduce_dimensions(clip_features, 512)
+        else:
+            vectors['clip_vector'] = None
+        
+        # 2. Edge features (reduce to 256 dimensions)
+        edge_features = self.extract_edge_features(image_array)
+        if edge_features is not None:
+            # Combine edge histogram with HOG-like features
+            gray = cv2.cvtColor(image_array, cv2.COLOR_RGB2GRAY) if len(image_array.shape) == 3 else image_array
+            resized = cv2.resize(gray, (64, 64))
+            
+            # Extract gradients
+            gx = cv2.Sobel(resized, cv2.CV_32F, 1, 0, ksize=3)
+            gy = cv2.Sobel(resized, cv2.CV_32F, 0, 1, ksize=3)
+            
+            # Create gradient magnitude histogram
+            magnitude = np.sqrt(gx**2 + gy**2)
+            mag_hist, _ = np.histogram(magnitude.flatten(), bins=128, range=(0, 255))
+            mag_hist = mag_hist.astype(np.float32) / (mag_hist.sum() + 1e-6)
+            
+            # Combine edge orientations + gradient magnitudes
+            combined = np.concatenate([edge_features, mag_hist])
+            vectors['edge_vector'] = self._reduce_dimensions(combined, 256)
+        else:
+            vectors['edge_vector'] = None
+        
+        # 3. Texture features (reduce to 128 dimensions)
+        lbp_features = self.extract_lbp_features(image_array)
+        line_tracing_features = self.extract_line_tracing_features(image_array, image_path)
+        
+        texture_combined = []
+        if lbp_features is not None:
+            texture_combined.append(lbp_features)
+        if line_tracing_features is not None:
+            texture_combined.append(line_tracing_features)
+        
+        if texture_combined:
+            texture_features = np.concatenate(texture_combined)
+            vectors['texture_vector'] = self._reduce_dimensions(texture_features, 128)
+        else:
+            vectors['texture_vector'] = None
+        
+        return vectors
+
     def extract_color_features(self, image_array):
         """Extract color histogram features"""
         # Resize for faster processing
@@ -216,12 +296,19 @@ class ImageProcessor:
         # Create processed image (resized for storage)
         processed_image = image.resize((512, 512), Image.Resampling.LANCZOS)
         
+        # Extract vector embeddings for pgvector similarity search
+        vectors = self.extract_vector_embeddings(image_array, image_path)
+        
         result = {
             "features": features,
             "quality_score": quality_score,
             "image_size": image.size,
             "image_array": image_array,
             "processed_image": processed_image,  # Return processed image for in-memory storage
+            # Vector embeddings for fast similarity search
+            "clip_vector": vectors.get('clip_vector'),
+            "edge_vector": vectors.get('edge_vector'),
+            "texture_vector": vectors.get('texture_vector'),
         }
 
         if save_processed_path:

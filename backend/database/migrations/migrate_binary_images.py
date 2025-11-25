@@ -6,7 +6,7 @@ This script migrates existing user_groups to use binary image storage
 import os
 import sys
 from sqlalchemy import text
-from extensions import db
+from core.extensions import db
 from app import create_app
 
 

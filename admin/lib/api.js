@@ -75,6 +75,12 @@ export const adminAPI = {
     updateCrawlerConfig: (id, config) => apiClient.put(`/admin/crawlers/${id}/config`, config),
     getCrawlerStats: (id) => apiClient.get(`/admin/crawlers/${id}/stats`),
     clearCrawlerCache: (id) => apiClient.post(`/admin/crawlers/${id}/cache/clear`),
+    
+    // Production monitoring endpoints
+    getCrawlerJobStatus: (id) => apiClient.get(`/admin/crawlers/${id}/job/status`),
+    getWorkersHealth: () => apiClient.get('/admin/workers/health'),
+    getSystemMonitoring: () => apiClient.get('/admin/system/monitoring'),
+    getDeadLetterQueue: () => apiClient.get('/admin/jobs/dead-letter-queue'),
 
     // System statistics
     getStats: () => apiClient.get('/admin/stats'),

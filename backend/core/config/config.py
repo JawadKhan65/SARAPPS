@@ -13,9 +13,15 @@ class Config:
     )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SQLALCHEMY_ENGINE_OPTIONS = {
-        "pool_size": 10,
-        "pool_recycle": 3600,
-        "pool_pre_ping": True,
+        "pool_size": 20,  # Increased from 10 for better concurrency
+        "max_overflow": 10,  # Allow 10 extra connections when pool is full
+        "pool_recycle": 3600,  # Recycle connections after 1 hour
+        "pool_pre_ping": True,  # Verify connections before use
+        "pool_timeout": 30,  # Wait up to 30s for connection from pool
+        "connect_args": {
+            "connect_timeout": 10,  # Initial connection timeout
+            "options": "-c statement_timeout=30000"  # 30s query timeout
+        }
     }
 
     # Redis
@@ -50,7 +56,7 @@ class Config:
     # CORS
     CORS_ORIGINS = os.getenv(
         "CORS_ORIGINS",
-        "http://localhost:3000,http://localhost:3001,https://localhost:443",
+        "http://localhost:3000,http://localhost:3001,http://192.168.1.8:3000,http://192.168.1.8:3001,https://localhost:443",
     ).split(",")
 
 

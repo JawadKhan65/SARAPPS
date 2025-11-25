@@ -8,8 +8,8 @@ from typing import Optional, List, Dict
 
 logger = logging.getLogger(__name__)
 
-# Default user agent to use for requests
-DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+# Default user agent to use for requests (Chrome 120 - Latest)
+DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 
 class BatchProcessingMixin:
@@ -26,9 +26,27 @@ class BatchProcessingMixin:
             bytes: Image data in memory, or None if download failed
         """
         import requests
+        from urllib.parse import urlparse
         
         try:
-            headers = {"User-Agent": user_agent}
+            # Extract domain for Referer header (prevents 403 Forbidden)
+            parsed = urlparse(image_url)
+            referer = f"{parsed.scheme}://{parsed.netloc}/"
+            
+            # Production-grade headers to avoid 403/bot detection
+            headers = {
+                "User-Agent": user_agent,
+                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Referer": referer,
+                "DNT": "1",
+                "Connection": "keep-alive",
+                "Sec-Fetch-Dest": "image",
+                "Sec-Fetch-Mode": "no-cors",
+                "Sec-Fetch-Site": "same-origin",
+            }
+            
             response = requests.get(image_url, timeout=10, headers=headers)
             response.raise_for_status()
             logger.debug(f"Downloaded image to memory: {len(response.content)} bytes from {image_url}")

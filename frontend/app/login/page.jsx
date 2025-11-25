@@ -19,7 +19,9 @@ export default function LoginPage() {
     const [errors, setErrors] = useState({});
     const [otpRequired, setOtpRequired] = useState(false);
     const [otpCode, setOtpCode] = useState('');
-    const { login, verifyOtp, isLoading, error } = useAuthStore();
+    const [otpError, setOtpError] = useState('');
+    const [resendingOtp, setResendingOtp] = useState(false);
+    const { login, verifyOtp, isLoading, error, setError } = useAuthStore();
 
     const redirect = searchParams.get('redirect') || '/dashboard';
 
@@ -93,11 +95,13 @@ export default function LoginPage() {
         e.preventDefault();
 
         if (!otpCode || otpCode.length !== 6) {
+            setOtpError('Please enter a valid 6-digit code');
             toast.error('Please enter a valid 6-digit code');
             return;
         }
 
         try {
+            setOtpError('');
             await verifyOtp(email, otpCode, rememberMe);
 
             // Save email if remember me is checked
@@ -114,8 +118,30 @@ export default function LoginPage() {
                 router.push(redirect);
             }, 500);
         } catch (error) {
-            toast.error(error.message || 'Invalid verification code');
+            // Keep OTP screen visible and show error
+            const errorMessage = error.response?.data?.message || error.message || 'Invalid verification code. Please try again.';
+            setOtpError(errorMessage);
+            toast.error(errorMessage);
+            // Clear the OTP input so user can try again
+            setOtpCode('');
             console.error('OTP verification failed:', error);
+        }
+    };
+
+    const handleResendOtp = async () => {
+        setResendingOtp(true);
+        setOtpError('');
+        try {
+            // Re-trigger login to get a new OTP
+            const result = await login(email, password);
+            if (result?.otp_required) {
+                toast.success('New verification code sent to your email');
+                setOtpCode('');
+            }
+        } catch (error) {
+            toast.error('Failed to resend code. Please try again.');
+        } finally {
+            setResendingOtp(false);
         }
     };
 
@@ -256,21 +282,40 @@ export default function LoginPage() {
                                     <p className="text-purple-600 font-semibold">{email}</p>
                                 </div>
 
-                                <Input
-                                    id="otp"
-                                    type="text"
-                                    label="Verification Code"
-                                    value={otpCode}
-                                    onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                                    placeholder="000000"
-                                    required
-                                    maxLength={6}
-                                    leftIcon={
-                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                                        </svg>
-                                    }
-                                />
+                                <div>
+                                    <Input
+                                        id="otp"
+                                        type="text"
+                                        label="Verification Code"
+                                        value={otpCode}
+                                        onChange={(e) => {
+                                            setOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6));
+                                            setOtpError('');
+                                            setError(null);
+                                        }}
+                                        placeholder="000000"
+                                        required
+                                        maxLength={6}
+                                        error={otpError}
+                                        leftIcon={
+                                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                                            </svg>
+                                        }
+                                    />
+                                    
+                                    {/* Resend Code Button */}
+                                    <div className="mt-3 text-center">
+                                        <button
+                                            type="button"
+                                            onClick={handleResendOtp}
+                                            disabled={resendingOtp}
+                                            className="text-sm text-purple-600 hover:text-purple-700 font-semibold transition-colors disabled:opacity-50"
+                                        >
+                                            {resendingOtp ? 'Sending...' : 'Didn\'t receive the code? Resend'}
+                                        </button>
+                                    </div>
+                                </div>
 
                                 <Button
                                     type="submit"
@@ -288,8 +333,10 @@ export default function LoginPage() {
                                     onClick={() => {
                                         setOtpRequired(false);
                                         setOtpCode('');
+                                        setOtpError('');
+                                        setError(null);
                                     }}
-                                    className="w-full text-center text-sm text-gray-600 hover:text-gray-800 font-medium"
+                                    className="w-full text-center text-sm text-gray-600 hover:text-gray-800 font-medium transition-colors"
                                 >
                                     ← Back to login
                                 </button>

@@ -42,7 +42,7 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 PRODUCTS_CONTAINER_SELECTOR = "div.products"
 PRODUCT_ITEM_SELECTOR = "div.product"
 PAGINATION_NAV_SELECTOR = "nav.pagination-a"
-PRODUCT_TITLE_SELECTOR = "header.title h1"
+PRODUCT_TITLE_SELECTOR = "h1.page-title span.base"
 FEATURED_CONTAINER_SELECTOR = "div.featured"
 PRODUCT_IMG_NAV_SELECTOR = "div.product-img-nav"
 OWL_ITEM_SELECTOR = "div.owl-item"
@@ -759,7 +759,7 @@ async def main():
 
     # Run scraper with test callback
     await scraper.scrape(
-        max_pages=1,  # Test with 1 page only
+        max_pages=None,  # Production: scrape all pages
         batch_callback=test_callback,
         batch_size=5,
     )

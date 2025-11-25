@@ -218,7 +218,7 @@ export default function SettingsPage() {
                                 }
                                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-600 outline-none"
                             />
-                            <p className="text-xs text-gray-500 mt-1">Minimum 15 characters</p>
+                            <p className="text-xs text-gray-500 mt-1">Minimum 9 characters</p>
                         </div>
 
                         <div>
@@ -267,7 +267,7 @@ export default function SettingsPage() {
                         </button>
                     </div>
                 </div>
-            </main>
-        </div>
+            </main >
+        </div >
     );
 }

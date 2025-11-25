@@ -1,8 +1,8 @@
 from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from datetime import datetime
-from extensions import db
-from models import Crawler, CrawlerStatistics
+from core.extensions import db
+from core.models import Crawler, CrawlerStatistics
 import uuid
 
 crawlers_bp = Blueprint("crawlers", __name__)

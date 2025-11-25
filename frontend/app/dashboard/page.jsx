@@ -12,6 +12,8 @@ export default function DashboardPage() {
     const { isAuthenticated, user } = useAuthStore();
     const fileInputRef = useRef(null);
     const cameraInputRef = useRef(null);
+    const videoRef = useRef(null);
+    const canvasRef = useRef(null);
 
     const [uploadedImage, setUploadedImage] = useState(null);
     const [imagePreview, setImagePreview] = useState(null);
@@ -20,11 +22,16 @@ export default function DashboardPage() {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
     const [dragActive, setDragActive] = useState(false);
-    const [matchLimit, setMatchLimit] = useState(4);
+    const [matchLimit, setMatchLimit] = useState(null); // null = all matches
+    const [displayedMatches, setDisplayedMatches] = useState(12); // Show 12 initially
     const [imageId, setImageId] = useState(null);
+    const [totalMatches, setTotalMatches] = useState(0);
     const [featureData, setFeatureData] = useState(null);
     const [loadingFeatures, setLoadingFeatures] = useState(false);
     const [matchImages, setMatchImages] = useState({});
+    const [showCameraModal, setShowCameraModal] = useState(false);
+    const [cameraStream, setCameraStream] = useState(null);
+    const [isCameraReady, setIsCameraReady] = useState(false);
 
     useEffect(() => {
         if (!isAuthenticated) {
@@ -32,9 +39,104 @@ export default function DashboardPage() {
         }
     }, [isAuthenticated, router]);
 
+    // Cleanup camera stream when component unmounts
+    useEffect(() => {
+        return () => {
+            if (cameraStream) {
+                cameraStream.getTracks().forEach(track => track.stop());
+            }
+        };
+    }, [cameraStream]);
+
     if (!isAuthenticated) {
         return null;
     }
+
+    const startCamera = async () => {
+        try {
+            // Check if mediaDevices API is available
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                throw new Error('Camera API not supported. Please use HTTPS or a modern browser.');
+            }
+
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: {
+                    facingMode: 'environment', // Use back camera on mobile
+                    width: { ideal: 1920 },
+                    height: { ideal: 1080 }
+                }
+            });
+
+            if (videoRef.current) {
+                videoRef.current.srcObject = stream;
+                videoRef.current.play();
+                setCameraStream(stream);
+                setIsCameraReady(true);
+            }
+        } catch (err) {
+            console.error('Error accessing camera:', err);
+            setError(err.message || 'Could not access camera. Please check permissions.');
+            setShowCameraModal(false);
+        }
+    };
+
+    const stopCamera = () => {
+        if (cameraStream) {
+            cameraStream.getTracks().forEach(track => track.stop());
+            setCameraStream(null);
+            setIsCameraReady(false);
+        }
+    };
+
+    const capturePhoto = () => {
+        if (!videoRef.current || !canvasRef.current) return;
+
+        const video = videoRef.current;
+        const canvas = canvasRef.current;
+        const context = canvas.getContext('2d');
+
+        // Set canvas dimensions to match video
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+
+        // Draw current video frame to canvas
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        // Convert canvas to blob
+        canvas.toBlob(async (blob) => {
+            if (blob) {
+                const file = new File([blob], `camera-capture-${Date.now()}.jpg`, {
+                    type: 'image/jpeg'
+                });
+
+                // Close camera modal
+                stopCamera();
+                setShowCameraModal(false);
+
+                // Upload the captured image
+                await handleImageUpload(file);
+            }
+        }, 'image/jpeg', 0.95);
+    };
+
+    const openCameraModal = () => {
+        // Check if camera API is available (needs HTTPS on mobile)
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            // Fallback to native file input with camera capture
+            if (cameraInputRef.current) {
+                cameraInputRef.current.click();
+            }
+            return;
+        }
+
+        setShowCameraModal(true);
+        setTimeout(() => startCamera(), 100);
+    };
+
+    const closeCameraModal = () => {
+        stopCamera();
+        setShowCameraModal(false);
+    };
 
     const getConfidenceTier = (similarity) => {
         const percentage = similarity * 100;
@@ -93,6 +195,8 @@ export default function DashboardPage() {
             }));
 
             setMatches(mappedMatches);
+            setTotalMatches(identifyResponse.data.total_matches || mappedMatches.length);
+            setDisplayedMatches(12); // Show first 12 initially
 
             // Load feature extraction data
             setLoadingFeatures(true);
@@ -104,13 +208,13 @@ export default function DashboardPage() {
             }
             setLoadingFeatures(false);
 
-            // Load match images
-            const imagePromises = mappedMatches.slice(0, 4).map(async (match) => {
+            // Load match images for first 12 matches (using original images)
+            const imagePromises = mappedMatches.slice(0, 12).map(async (match) => {
                 try {
-                    const imgResponse = await userAPI.getSoleImage(match.sole_image_id);
+                    const imgResponse = await userAPI.getSoleImageOriginal(match.sole_image_id);
                     return [match.sole_image_id, imgResponse.data.image];
                 } catch (err) {
-                    console.error(`Failed to load image for ${match.sole_image_id}:`, err);
+                    console.error(`Failed to load original image for ${match.sole_image_id}:`, err);
                     return [match.sole_image_id, null];
                 }
             });
@@ -165,8 +269,14 @@ export default function DashboardPage() {
         setImageId(null);
         setFeatureData(null);
         setMatchImages({});
+        setTotalMatches(0);
+        setDisplayedMatches(12);
         if (fileInputRef.current) fileInputRef.current.value = '';
         if (cameraInputRef.current) cameraInputRef.current.value = '';
+    };
+
+    const loadMoreMatches = () => {
+        setDisplayedMatches(prev => Math.min(prev + 12, matches?.length || 0));
     };
 
     return (
@@ -209,28 +319,20 @@ export default function DashboardPage() {
                         )}
                     </div>
 
-                    {/* Match Limit Slider */}
+                    {/* Match Info Banner - Shows ALL matches */}
                     <div className="mb-6 p-4 bg-gradient-to-r from-blue-50 to-purple-50 rounded-xl border border-blue-200">
-                        <div className="flex items-center justify-between mb-3">
-                            <label className="text-sm font-semibold text-gray-700">
-                                Number of Matches to Find
-                            </label>
-                            <span className="text-2xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
-                                {matchLimit}
-                            </span>
-                        </div>
-                        <input
-                            type="range"
-                            min="1"
-                            max="20"
-                            value={matchLimit}
-                            onChange={(e) => setMatchLimit(parseInt(e.target.value))}
-                            disabled={loading}
-                            className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
-                        />
-                        <div className="flex justify-between text-xs text-gray-500 mt-2">
-                            <span>1 match</span>
-                            <span>20 matches</span>
+                        <div className="text-center">
+                            <p className="text-sm font-semibold text-gray-700 mb-1">
+                                🔍 Smart Matching Enabled
+                            </p>
+                            <p className="text-xs text-gray-600">
+                                Finding ALL matches in our database for the best results
+                            </p>
+                            {totalMatches > 0 && (
+                                <p className="text-sm font-bold text-blue-600 mt-2">
+                                    Found {totalMatches} total matches
+                                </p>
+                            )}
                         </div>
                     </div>
 
@@ -283,7 +385,7 @@ export default function DashboardPage() {
 
                         {/* Camera Capture */}
                         <div
-                            onClick={() => !loading && cameraInputRef.current?.click()}
+                            onClick={() => !loading && openCameraModal()}
                             className={`group border-2 border-dashed border-purple-300 rounded-2xl p-10 text-center cursor-pointer hover:border-purple-400 hover:bg-purple-50 transition-all duration-300 ${loading ? 'opacity-50 cursor-not-allowed' : ''
                                 }`}
                         >
@@ -309,9 +411,10 @@ export default function DashboardPage() {
                                     Capture with your camera
                                 </p>
                                 <p className="text-xs text-gray-400">
-                                    Best for mobile devices
+                                    Uses your device camera
                                 </p>
                             </div>
+                            {/* Hidden file input as fallback */}
                             <input
                                 ref={cameraInputRef}
                                 type="file"
@@ -324,6 +427,87 @@ export default function DashboardPage() {
                         </div>
                     </div>
                 </div>
+
+                {/* Camera Modal */}
+                {showCameraModal && (
+                    <div className="fixed inset-0 bg-black bg-opacity-90 z-50 flex items-center justify-center p-4">
+                        <div className="relative w-full max-w-4xl">
+                            {/* Close Button */}
+                            <button
+                                onClick={closeCameraModal}
+                                className="absolute top-4 right-4 z-10 bg-white bg-opacity-20 hover:bg-opacity-30 text-white rounded-full p-3 backdrop-blur-sm transition-all"
+                            >
+                                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                            </button>
+
+                            {/* Camera View */}
+                            <div className="bg-black rounded-2xl overflow-hidden shadow-2xl">
+                                <div className="relative aspect-video bg-gray-900">
+                                    <video
+                                        ref={videoRef}
+                                        className="w-full h-full object-cover"
+                                        autoPlay
+                                        playsInline
+                                        muted
+                                    />
+
+                                    {!isCameraReady && (
+                                        <div className="absolute inset-0 flex items-center justify-center">
+                                            <div className="text-center">
+                                                <div className="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-white mx-auto mb-4"></div>
+                                                <p className="text-white text-lg">Starting camera...</p>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Camera Overlay */}
+                                    {isCameraReady && (
+                                        <div className="absolute inset-0 pointer-events-none">
+                                            {/* Guide Frame */}
+                                            <div className="absolute inset-0 flex items-center justify-center">
+                                                <div className="w-72 h-72 border-4 border-white border-opacity-50 rounded-2xl"></div>
+                                            </div>
+
+                                            {/* Instructions */}
+                                            <div className="absolute top-4 left-0 right-0 text-center">
+                                                <p className="text-white text-lg font-semibold bg-black bg-opacity-50 inline-block px-4 py-2 rounded-full backdrop-blur-sm">
+                                                    📸 Position shoe sole in frame
+                                                </p>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Controls */}
+                                <div className="bg-gray-900 p-6 flex items-center justify-center gap-4">
+                                    <button
+                                        onClick={closeCameraModal}
+                                        className="px-6 py-3 bg-gray-700 hover:bg-gray-600 text-white rounded-xl font-semibold transition-all"
+                                    >
+                                        Cancel
+                                    </button>
+
+                                    <button
+                                        onClick={capturePhoto}
+                                        disabled={!isCameraReady}
+                                        className="px-8 py-3 bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white rounded-xl font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg flex items-center gap-2"
+                                    >
+                                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <circle cx="12" cy="12" r="3" />
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                                        </svg>
+                                        Capture Photo
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Hidden canvas for capture */}
+                            <canvas ref={canvasRef} className="hidden" />
+                        </div>
+                    </div>
+                )}
 
                 {/* Image Preview and Results */}
                 {imagePreview && (
@@ -483,11 +667,16 @@ export default function DashboardPage() {
                                             </details>
                                         )}
 
-                                        {/* Top Matches - First 4 with Images */}
+                                        {/* All Matches Display */}
                                         <div>
-                                            <h4 className="text-lg font-bold text-gray-900 mb-4">🏆 Top Matches</h4>
-                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                                {matches.slice(0, 4).map((match, idx) => {
+                                            <h4 className="text-lg font-bold text-gray-900 mb-4 flex items-center justify-between">
+                                                <span>🏆 All Matches</span>
+                                                <span className="text-sm font-normal text-gray-600">
+                                                    Showing {Math.min(displayedMatches, matches.length)} of {matches.length}
+                                                </span>
+                                            </h4>
+                                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                                {matches.slice(0, displayedMatches).map((match, idx) => {
                                                     const tier = getConfidenceTier(match.similarity);
                                                     const medals = ['🥇', '🥈', '🥉', '🏅'];
                                                     const matchImage = matchImages[match.sole_image_id];
@@ -570,11 +759,26 @@ export default function DashboardPage() {
                                             </div>
                                         </div>
 
-                                        {/* All Matches Table */}
-                                        {matches.length > 4 && (
-                                            <details className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+                                        {/* Load More Button */}
+                                        {matches.length > displayedMatches && (
+                                            <div className="text-center mt-8">
+                                                <button
+                                                    onClick={loadMoreMatches}
+                                                    className="px-8 py-4 bg-gradient-to-r from-blue-500 to-purple-500 text-white rounded-xl font-bold text-lg hover:shadow-lg hover:shadow-purple-500/50 transition-all transform hover:scale-105"
+                                                >
+                                                    Load More Matches ({matches.length - displayedMatches} remaining)
+                                                </button>
+                                                <p className="text-sm text-gray-500 mt-3">
+                                                    Showing {displayedMatches} of {matches.length} total matches
+                                                </p>
+                                            </div>
+                                        )}
+
+                                        {/* All Matches Detailed Table */}
+                                        {matches.length > 12 && (
+                                            <details className="bg-white rounded-2xl border border-gray-200 overflow-hidden mt-8">
                                                 <summary className="cursor-pointer px-6 py-4 bg-gradient-to-r from-gray-50 to-blue-50 font-bold text-gray-900 hover:bg-blue-100 transition-colors">
-                                                    📋 View All {matches.length} Matches (Detailed List)
+                                                    📋 View Complete Table ({matches.length} Matches)
                                                 </summary>
                                                 <div className="p-6 max-h-96 overflow-y-auto">
                                                     <div className="space-y-3">

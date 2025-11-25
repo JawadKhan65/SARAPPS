@@ -1,8 +1,8 @@
 from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from datetime import datetime
-from extensions import db
-from models import MatchResult, SoleImage, UploadedImage
+from core.extensions import db
+from core.models import MatchResult, SoleImage, UploadedImage
 
 matches_bp = Blueprint("matches", __name__)
 
@@ -199,37 +199,114 @@ def re_match(match_id):
         return jsonify({"error": "Uploaded image not found"}), 404
 
     try:
+        import cv2 as cv
+        import os
         from services.image_processor import ImageProcessor
+        from sqlalchemy import text
 
         processor = ImageProcessor()
+        
+        # Load uploaded image for vector extraction
+        uploaded_img_array = None
+        if os.path.exists(uploaded_image.file_path):
+            uploaded_img_array = cv.imread(uploaded_image.file_path, cv.IMREAD_COLOR)
+        
+        if uploaded_img_array is None:
+            return jsonify({"error": "Could not load uploaded image"}), 400
 
-        # Deserialize features
-        uploaded_features = processor.deserialize_features(
-            uploaded_image.feature_vector
+        # === STAGE 1: Fast Vector Search using pgvector ===
+        uploaded_vectors = processor.extract_vector_embeddings(
+            uploaded_img_array,
+            uploaded_image.file_path
         )
-
-        # Get all sole images
-        sole_images = SoleImage.query.all()
-
+        
+        clip_vec = uploaded_vectors.get('clip_vector')
+        edge_vec = uploaded_vectors.get('edge_vector')
+        texture_vec = uploaded_vectors.get('texture_vector')
+        
         matches = []
-        for sole in sole_images:
-            sole_features = processor.deserialize_features(sole.feature_vector)
-            similarity = processor.calculate_similarity(
-                uploaded_features, sole_features
+        
+        # Try vector-based search first (much faster!)
+        if clip_vec is not None and edge_vec is not None and texture_vec is not None:
+            try:
+                current_app.logger.info("Re-match: Using pgvector fast similarity search...")
+                
+                candidates_query = text("""
+                    SELECT 
+                        id,
+                        brand,
+                        product_type,
+                        product_name,
+                        source_url,
+                        quality_score,
+                        (
+                            0.40 * (1 - (clip_embedding <=> CAST(:clip_vec AS vector))) +
+                            0.35 * (1 - (edge_embedding <-> CAST(:edge_vec AS vector))) +
+                            0.25 * (1 - (texture_embedding <=> CAST(:texture_vec AS vector)))
+                        ) as vector_similarity
+                    FROM sole_images
+                    WHERE clip_embedding IS NOT NULL
+                        AND edge_embedding IS NOT NULL
+                        AND texture_embedding IS NOT NULL
+                    ORDER BY vector_similarity DESC
+                    LIMIT 20
+                """)
+                
+                result = db.session.execute(
+                    candidates_query,
+                    {
+                        "clip_vec": clip_vec.tolist(),
+                        "edge_vec": edge_vec.tolist(),
+                        "texture_vec": texture_vec.tolist(),
+                    }
+                )
+                
+                # Convert results to matches
+                for row in result:
+                    matches.append({
+                        "sole_id": row.id,
+                        "brand": row.brand,
+                        "product_type": row.product_type,
+                        "product_name": row.product_name,
+                        "confidence": float(row.vector_similarity),
+                    })
+                
+                current_app.logger.info(f"✓ Vector search found {len(matches)} matches")
+            except Exception as e:
+                current_app.logger.warning(f"Vector search failed: {str(e)}")
+                matches = []
+        
+        # Fallback to legacy feature-based search if vector search failed
+        if not matches:
+            current_app.logger.info("Re-match: Using legacy linear feature search...")
+            uploaded_features = processor.deserialize_features(
+                uploaded_image.feature_vector
             )
-
-            matches.append(
-                {
-                    "sole_id": sole.id,
-                    "brand": sole.brand,
-                    "product_type": sole.product_type,
-                    "product_name": sole.product_name,
-                    "confidence": similarity,
-                }
-            )
-
-        # Sort and get top 4
-        matches.sort(key=lambda x: x["confidence"], reverse=True)
+            
+            sole_images = SoleImage.query.all()
+            
+            for sole in sole_images:
+                if sole.feature_vector:
+                    try:
+                        sole_features = processor.deserialize_features(sole.feature_vector)
+                        similarity = processor.calculate_similarity(
+                            uploaded_features, sole_features
+                        )
+                        
+                        matches.append({
+                            "sole_id": sole.id,
+                            "brand": sole.brand,
+                            "product_type": sole.product_type,
+                            "product_name": sole.product_name,
+                            "confidence": similarity,
+                        })
+                    except Exception:
+                        continue
+            
+            # Sort by confidence
+            matches.sort(key=lambda x: x["confidence"], reverse=True)
+        
+        # Get top 4 matches
         top_matches = matches[:4]
 
         # Update match result

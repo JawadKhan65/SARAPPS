@@ -124,65 +124,122 @@ export default function MatchesPage() {
                             const productType = shoe.product_type || match.shoe_type || match.product_type || 'N/A';
                             const sourceUrl = shoe.source_url || match.url || '#';
                             const createdAt = match.matched_at || match.created_at || new Date().toISOString();
+                            const totalMatches = match.total_matches || 0;
+                            const allMatches = match.all_matches || [];
 
                             return (
                                 <div
                                     key={match.id}
-                                    className="bg-white rounded-lg shadow hover:shadow-lg transition p-6"
+                                    className="bg-white rounded-lg shadow hover:shadow-lg transition"
                                 >
-                                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-center">
-                                        {/* Product Info */}
-                                        <div>
-                                            <p className="text-sm text-gray-500">Brand</p>
-                                            <p className="font-bold text-gray-900">{brand}</p>
-                                            <p className="text-sm text-gray-600">{productName}</p>
-                                        </div>
+                                    <div className="p-6">
+                                        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-center">
+                                            {/* Product Info */}
+                                            <div>
+                                                <p className="text-sm text-gray-500">Top Match</p>
+                                                <p className="font-bold text-gray-900">{brand}</p>
+                                                <p className="text-sm text-gray-600">{productName}</p>
+                                                <p className="text-xs text-gray-400 mt-1">{productType}</p>
+                                            </div>
 
-                                        {/* Type */}
-                                        <div>
-                                            <p className="text-sm text-gray-500">Type</p>
-                                            <p className="font-medium text-gray-900">{productType}</p>
-                                        </div>
+                                            {/* Match Stats */}
+                                            <div>
+                                                <p className="text-sm text-gray-500">Total Matches Found</p>
+                                                <p className="text-2xl font-bold text-gray-900">{totalMatches}</p>
+                                            </div>
 
-                                        {/* Similarity Score */}
-                                        <div>
-                                            <p className="text-sm text-gray-500">Match Score</p>
-                                            <div className="flex items-center gap-2">
-                                                <div className="flex-1 bg-gray-200 rounded-full h-2">
-                                                    <div
-                                                        className="bg-blue-600 h-2 rounded-full"
-                                                        style={{ width: `${similarity * 100}%` }}
-                                                    ></div>
+                                            {/* Similarity Score */}
+                                            <div>
+                                                <p className="text-sm text-gray-500">Best Match Score</p>
+                                                <div className="flex items-center gap-2">
+                                                    <div className="flex-1 bg-gray-200 rounded-full h-2">
+                                                        <div
+                                                            className="bg-blue-600 h-2 rounded-full"
+                                                            style={{ width: `${similarity * 100}%` }}
+                                                        ></div>
+                                                    </div>
+                                                    <span className="text-lg font-bold text-blue-600">
+                                                        {Math.round(similarity * 100)}%
+                                                    </span>
                                                 </div>
-                                                <span className="text-lg font-bold text-blue-600">
-                                                    {Math.round(similarity * 100)}%
+                                            </div>
+
+                                            {/* Tier Badge and Action */}
+                                            <div className="flex flex-col gap-2">
+                                                <span className={`px-3 py-1 rounded-full text-sm font-medium text-center ${tier.color}`}>
+                                                    {tier.label}
                                                 </span>
+                                                {sourceUrl && sourceUrl !== '#' && (
+                                                    <a
+                                                        href={sourceUrl}
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        className="text-blue-600 hover:text-blue-800 text-sm font-medium text-center"
+                                                    >
+                                                        View Product →
+                                                    </a>
+                                                )}
                                             </div>
                                         </div>
 
-                                        {/* Tier Badge and Action */}
-                                        <div className="flex flex-col gap-2">
-                                            <span className={`px-3 py-1 rounded-full text-sm font-medium text-center ${tier.color}`}>
-                                                {tier.label}
-                                            </span>
-                                            {sourceUrl && sourceUrl !== '#' && (
-                                                <a
-                                                    href={sourceUrl}
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                    className="text-blue-600 hover:text-blue-800 text-sm font-medium"
-                                                >
-                                                    View Product →
-                                                </a>
-                                            )}
+                                        {/* Metadata */}
+                                        <div className="mt-4 pt-4 border-t border-gray-200 flex justify-between text-xs text-gray-500">
+                                            <span>Identified: {new Date(createdAt).toLocaleDateString()} at {new Date(createdAt).toLocaleTimeString()}</span>
+                                            <span>{totalMatches} total results</span>
                                         </div>
                                     </div>
 
-                                    {/* Metadata */}
-                                    <div className="mt-4 pt-4 border-t border-gray-200 flex justify-between text-xs text-gray-500">
-                                        <span>Identified: {new Date(createdAt).toLocaleDateString()}</span>
-                                        <span>Source: {brand}</span>
-                                    </div>
+                                    {/* All Matches Details - Expandable */}
+                                    {allMatches && allMatches.length > 1 && (
+                                        <details className="border-t border-gray-200">
+                                            <summary className="cursor-pointer px-6 py-3 bg-gray-50 hover:bg-gray-100 transition-colors text-sm font-semibold text-gray-700">
+                                                📋 View All {allMatches.length} Matches
+                                            </summary>
+                                            <div className="p-6 bg-gray-50 max-h-96 overflow-y-auto">
+                                                <div className="space-y-2">
+                                                    {allMatches.map((m, idx) => {
+                                                        const matchTier = getTierBadge(m.similarity_score || 0);
+                                                        return (
+                                                            <div
+                                                                key={idx}
+                                                                className="flex items-center justify-between p-3 bg-white rounded-lg hover:bg-blue-50 transition-colors"
+                                                            >
+                                                                <div className="flex items-center gap-3 flex-1 min-w-0">
+                                                                    <span className="font-mono text-sm text-gray-500 w-8">#{m.rank}</span>
+                                                                    <div className="flex-1 min-w-0">
+                                                                        <div className="font-semibold text-gray-900 truncate">
+                                                                            {m.brand} - {m.product_name}
+                                                                        </div>
+                                                                        <div className="text-xs text-gray-500">{m.product_type}</div>
+                                                                    </div>
+                                                                </div>
+                                                                <div className="flex items-center gap-4">
+                                                                    <div className="text-right">
+                                                                        <div className="font-bold text-lg text-blue-600">
+                                                                            {(m.similarity_score * 100).toFixed(1)}%
+                                                                        </div>
+                                                                        <span className={`text-xs px-2 py-1 rounded-full ${matchTier.color}`}>
+                                                                            {matchTier.label}
+                                                                        </span>
+                                                                    </div>
+                                                                    {m.source_url && (
+                                                                        <a
+                                                                            href={m.source_url}
+                                                                            target="_blank"
+                                                                            rel="noopener noreferrer"
+                                                                            className="px-3 py-1 bg-blue-500 text-white rounded-lg text-xs font-semibold hover:bg-blue-600 transition-colors"
+                                                                        >
+                                                                            View
+                                                                        </a>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            </div>
+                                        </details>
+                                    )}
                                 </div>
                             );
                         })}

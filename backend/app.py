@@ -7,9 +7,11 @@ load_dotenv()
 
 from flask import Flask
 from flask_cors import CORS
-from config import config
-from extensions import db, jwt, mail, setup_logging
-from models import (
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from core.config.config import config
+from core.extensions import db, jwt, mail, setup_logging
+from core.models import (
     User,
     AdminUser,
     SoleImage,
@@ -19,7 +21,7 @@ from models import (
     CrawlerStatistics,
     SystemConfig,
 )
-import firebase_config  # Initialize Firebase Admin SDK
+import core.config.firebase_config  # Initialize Firebase Admin SDK
 
 
 def create_app(config_name=None):
@@ -36,16 +38,36 @@ def create_app(config_name=None):
     mail.init_app(app)
 
     # CORS setup with proper preflight handling
+    # Use environment-based origins for security
+    allowed_origins = app.config.get("CORS_ORIGINS", [])
+    if isinstance(allowed_origins, str):
+        allowed_origins = [origin.strip() for origin in allowed_origins.split(",")]
+    
     CORS(
         app,
-        origins=app.config["CORS_ORIGINS"],
+        resources={r"/api/*": {"origins": allowed_origins}},
         supports_credentials=True,
-        allow_headers=["Content-Type", "Authorization"],
+        allow_headers=["Content-Type", "Authorization", "Accept", "Origin"],
+        expose_headers=["Content-Type", "Authorization"],
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        max_age=3600,
     )
 
     # Logging setup
     setup_logging(app)
+
+    # Rate limiting setup
+    limiter = Limiter(
+        app=app,
+        key_func=get_remote_address,
+        default_limits=["1000 per day", "200 per hour"],  # Increased for admin dashboard polling
+        storage_uri=app.config.get("REDIS_URL", "redis://localhost:6379/0"),
+        storage_options={"socket_connect_timeout": 30},
+        strategy="fixed-window",
+    )
+    
+    # Store limiter in app for use in routes
+    app.limiter = limiter
 
     # Create upload directories
     os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
@@ -86,6 +108,9 @@ def create_app(config_name=None):
     app.register_blueprint(
         images_bp
     )  # Uses /api/images prefix from blueprint definition
+    
+    # Exempt admin endpoints from rate limiting (they have JWT auth already)
+    limiter.exempt(admin_bp)
 
     # Serve static files (logo for emails)
     @app.route("/static/<path:filename>")

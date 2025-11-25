@@ -1,7 +1,12 @@
-from extensions import db
+from core.extensions import db
 from datetime import datetime
 from enum import Enum
 import uuid
+
+try:
+    from pgvector.sqlalchemy import Vector
+except ImportError:
+    Vector = None  # Fallback if pgvector not installed
 
 
 class User(db.Model):
@@ -32,6 +37,10 @@ class User(db.Model):
     otp_code = db.Column(db.String(6), nullable=True)
     otp_code_expiry = db.Column(db.DateTime, nullable=True)
 
+    # Password reset
+    reset_token = db.Column(db.String(255), nullable=True)
+    reset_token_expiry = db.Column(db.DateTime, nullable=True)
+
     # Timestamps
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
     last_login = db.Column(db.DateTime, nullable=True)
@@ -53,6 +62,7 @@ class User(db.Model):
         "MatchResult", back_populates="user", cascade="all, delete-orphan"
     )
     group = db.relationship("UserGroup", back_populates="users")
+    # Note: match_history relationship is defined in MatchHistory model using backref
 
     def __repr__(self):
         return f"<User {self.email}>"
@@ -131,9 +141,14 @@ class SoleImage(db.Model):
     )  # Processed/cropped sole image
     image_format = db.Column(db.String(10), nullable=True)  # e.g., 'PNG', 'JPEG'
 
-    # Vector representation for similarity matching
+    # Vector representation for similarity matching (legacy)
     feature_vector = db.Column(db.LargeBinary, nullable=True)  # Serialized numpy array
     lbp_histogram = db.Column(db.LargeBinary, nullable=True)  # LBP features
+
+    # pgvector columns for fast similarity search
+    clip_embedding = db.Column(Vector(512) if Vector else db.LargeBinary, nullable=True)  # CLIP 512-dim vectors
+    edge_embedding = db.Column(Vector(256) if Vector else db.LargeBinary, nullable=True)  # Edge features 256-dim
+    texture_embedding = db.Column(Vector(128) if Vector else db.LargeBinary, nullable=True)  # Texture features 128-dim
 
     # Metadata
     image_width = db.Column(db.Integer)
@@ -245,6 +260,86 @@ class MatchResult(db.Model):
 
     def __repr__(self):
         return f"<MatchResult {self.id}>"
+
+
+class MatchHistory(db.Model):
+    """Match history session - stores one record per image match request"""
+
+    __tablename__ = "match_history"
+
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = db.Column(
+        db.String(36), db.ForeignKey("users.id"), nullable=False, index=True
+    )
+    uploaded_image_id = db.Column(
+        db.String(36), db.ForeignKey("uploaded_images.id"), nullable=False, index=True
+    )
+
+    # Summary statistics
+    total_matches = db.Column(db.Integer, default=0)
+    best_score = db.Column(db.Float, nullable=True)  # Highest similarity score
+    matching_time_ms = db.Column(db.Integer, nullable=True)
+    
+    # Timestamps
+    matched_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+
+    # Relationships
+    user = db.relationship("User", backref=db.backref("match_history", lazy="dynamic"))
+    uploaded_image = db.relationship("UploadedImage", backref=db.backref("match_history", lazy="dynamic"))
+    match_details = db.relationship("MatchDetail", back_populates="match_history", cascade="all, delete-orphan", lazy="dynamic")
+
+    def __repr__(self):
+        return f"<MatchHistory {self.id} - {self.total_matches} matches>"
+
+
+class MatchDetail(db.Model):
+    """Individual match detail - stores each matched sole image"""
+
+    __tablename__ = "match_details"
+
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    match_history_id = db.Column(
+        db.String(36), db.ForeignKey("match_history.id"), nullable=False, index=True
+    )
+    sole_image_id = db.Column(
+        db.String(36), db.ForeignKey("sole_images.id"), nullable=False, index=True
+    )
+
+    # Match details
+    similarity_score = db.Column(db.Float, nullable=False, index=True)
+    rank = db.Column(db.Integer, nullable=False)  # Position in results (1=best match)
+
+    # Feature scores (optional detailed breakdown)
+    feature_score = db.Column(db.Float, nullable=True)
+    edge_score = db.Column(db.Float, nullable=True)
+    texture_score = db.Column(db.Float, nullable=True)
+    
+    # Timestamps
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+
+    # Relationships
+    match_history = db.relationship("MatchHistory", back_populates="match_details")
+    sole_image = db.relationship("SoleImage", backref=db.backref("match_details", lazy="dynamic"))
+
+    def __repr__(self):
+        return f"<MatchDetail {self.id} - Rank {self.rank} - Score {self.similarity_score:.3f}>"
+
+    def to_dict(self):
+        """Convert to dictionary for API responses"""
+        return {
+            "id": self.id,
+            "sole_image_id": self.sole_image_id,
+            "similarity_score": self.similarity_score,
+            "rank": self.rank,
+            "brand": self.sole_image.brand if self.sole_image else None,
+            "product_name": self.sole_image.product_name if self.sole_image else None,
+            "product_type": self.sole_image.product_type if self.sole_image else None,
+            "source_url": self.sole_image.source_url if self.sole_image else None,
+            "feature_score": self.feature_score,
+            "edge_score": self.edge_score,
+            "texture_score": self.texture_score,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
 
 
 class Crawler(db.Model):

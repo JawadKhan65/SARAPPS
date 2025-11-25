@@ -19,8 +19,8 @@ from werkzeug.security import generate_password_hash
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from extensions import db
-from models import User, UploadedImage, SoleImage, MatchResult, Crawler, AdminUser
+from core.extensions import db
+from core.models import User, UploadedImage, SoleImage, MatchResult, Crawler, AdminUser, MatchHistory, MatchDetail
 from app import create_app
 import uuid
 
@@ -41,23 +41,17 @@ def init_database():
     logger.info("Initializing database...")
 
     try:
-        # Create all tables
-        with db.engine.begin() as connection:
-            db.create_all()
-
-        logger.info("✓ All tables created successfully")
-
-        # Create indexes
-        create_indexes()
-
-        # Enable extensions (optional)
+        # Enable extensions FIRST (before creating tables that use them)
         with db.engine.begin() as connection:
             try:
                 connection.execute(db.text("CREATE EXTENSION IF NOT EXISTS pgvector"))
                 logger.info("✓ PostgreSQL pgvector extension enabled")
-            except Exception:
-                logger.info(
-                    "ℹ pgvector extension not available (optional for vector search)"
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ pgvector extension not available: {e}"
+                )
+                logger.warning(
+                    "   Vector search will not work. Install pgvector or tables will use LargeBinary fallback."
                 )
 
             try:
@@ -67,6 +61,15 @@ def init_database():
                 logger.info("✓ PostgreSQL uuid-ossp extension enabled")
             except Exception:
                 logger.info("ℹ uuid-ossp extension not available (using Python uuid)")
+
+        # Now create all tables (vector columns will work if pgvector is enabled)
+        with db.engine.begin() as connection:
+            db.create_all()
+
+        logger.info("✓ All tables created successfully")
+
+        # Create indexes
+        create_indexes()
 
         logger.info("✓ Database initialization complete")
 
@@ -119,6 +122,40 @@ def create_indexes():
                     "CREATE INDEX IF NOT EXISTS idx_match_results_similarity ON match_results(overall_similarity DESC)"
                 )
             )
+            
+            # Match History indexes
+            connection.execute(
+                db.text(
+                    "CREATE INDEX IF NOT EXISTS idx_match_history_user_id ON match_history(user_id)"
+                )
+            )
+            connection.execute(
+                db.text(
+                    "CREATE INDEX IF NOT EXISTS idx_match_history_matched_at ON match_history(matched_at DESC)"
+                )
+            )
+            connection.execute(
+                db.text(
+                    "CREATE INDEX IF NOT EXISTS idx_match_history_best_score ON match_history(best_score DESC)"
+                )
+            )
+            
+            # Match Detail indexes
+            connection.execute(
+                db.text(
+                    "CREATE INDEX IF NOT EXISTS idx_match_details_history_id ON match_details(match_history_id)"
+                )
+            )
+            connection.execute(
+                db.text(
+                    "CREATE INDEX IF NOT EXISTS idx_match_details_sole_image_id ON match_details(sole_image_id)"
+                )
+            )
+            connection.execute(
+                db.text(
+                    "CREATE INDEX IF NOT EXISTS idx_match_details_similarity ON match_details(similarity_score DESC)"
+                )
+            )
 
             # Crawler indexes
             connection.execute(
@@ -132,6 +169,87 @@ def create_indexes():
                 )
             )
 
+            # SoleImage indexes for performance
+            connection.execute(
+                db.text(
+                    "CREATE INDEX IF NOT EXISTS idx_sole_images_brand ON sole_images(brand)"
+                )
+            )
+            connection.execute(
+                db.text(
+                    "CREATE INDEX IF NOT EXISTS idx_sole_images_product_type ON sole_images(product_type)"
+                )
+            )
+            connection.execute(
+                db.text(
+                    "CREATE INDEX IF NOT EXISTS idx_sole_images_quality_score ON sole_images(quality_score DESC)"
+                )
+            )
+            connection.execute(
+                db.text(
+                    "CREATE INDEX IF NOT EXISTS idx_sole_images_crawled_at ON sole_images(crawled_at DESC)"
+                )
+            )
+            connection.execute(
+                db.text(
+                    "CREATE INDEX IF NOT EXISTS idx_sole_images_brand_type ON sole_images(brand, product_type)"
+                )
+            )
+            connection.execute(
+                db.text(
+                    "CREATE INDEX IF NOT EXISTS idx_sole_images_hash ON sole_images(image_hash)"
+                )
+            )
+
+            # Try to create vector indexes if pgvector is available
+            try:
+                logger.info("Creating pgvector indexes (this may take several minutes for large datasets)...")
+                
+                # Check if vector columns exist and have data
+                result = connection.execute(
+                    db.text("SELECT COUNT(*) FROM sole_images WHERE clip_embedding IS NOT NULL")
+                )
+                vector_count = result.scalar()
+                
+                if vector_count > 0:
+                    # Only create indexes if we have vector data
+                    # IVFFlat index for approximate nearest neighbor search
+                    # lists parameter should be sqrt(num_rows) for optimal performance
+                    lists = max(10, min(100, int(vector_count ** 0.5)))
+                    
+                    connection.execute(
+                        db.text(f"""
+                            CREATE INDEX IF NOT EXISTS idx_sole_images_clip_embedding 
+                            ON sole_images USING ivfflat (clip_embedding vector_cosine_ops) 
+                            WITH (lists = {lists})
+                        """)
+                    )
+                    logger.info(f"✓ Created CLIP embedding index with {lists} lists")
+                    
+                    connection.execute(
+                        db.text(f"""
+                            CREATE INDEX IF NOT EXISTS idx_sole_images_edge_embedding 
+                            ON sole_images USING ivfflat (edge_embedding vector_l2_ops) 
+                            WITH (lists = {lists})
+                        """)
+                    )
+                    logger.info(f"✓ Created edge embedding index with {lists} lists")
+                    
+                    connection.execute(
+                        db.text(f"""
+                            CREATE INDEX IF NOT EXISTS idx_sole_images_texture_embedding 
+                            ON sole_images USING ivfflat (texture_embedding vector_cosine_ops) 
+                            WITH (lists = {lists})
+                        """)
+                    )
+                    logger.info(f"✓ Created texture embedding index with {lists} lists")
+                else:
+                    logger.info("ℹ No vector data found. Vector indexes will be created after backfilling embeddings.")
+                    
+            except Exception as e:
+                logger.info(f"ℹ pgvector indexes not created: {e}")
+                logger.info("  This is expected if pgvector extension is not installed or no vector data exists yet.")
+
             logger.info("✓ All indexes created successfully")
 
     except Exception as e:
@@ -144,7 +262,7 @@ def create_default_admin():
 
     try:
         # Check if admin already exists
-        admin = AdminUser.query.filter_by(email="admin@shoeidentifier.local").first()
+        admin = AdminUser.query.filter_by(email="jawadkhan10322@gmail.com").first()
         if admin:
             logger.info("✓ Admin user already exists")
             return
@@ -152,7 +270,7 @@ def create_default_admin():
         # Create new admin
         admin = AdminUser(
             id=str(uuid.uuid4()),
-            email="admin@shoeidentifier.local",
+            email="jawadkhan10322@gmail.com",
             username="admin",
             password_hash=hash_password("admin123"),
             is_active=True,
@@ -163,7 +281,7 @@ def create_default_admin():
         db.session.commit()
 
         logger.info("✓ Default admin user created")
-        logger.info("  Email: admin@shoeidentifier.local")
+        logger.info("  Email: jawadkhan10322@gmail.com")
         logger.info("  Password: admin123 (please change on first login)")
 
     except Exception as e:
@@ -242,6 +360,11 @@ def create_sample_crawlers():
                 "name": "Military 1st",
                 "url": "https://www.military1st.eu/footwear/boots",
                 "module": "military1st",
+            },
+            {
+                "name": "GearPoint",
+                "url": "https://www.gearpoint.nl/en/search/shoes",
+                "module": "gearpoint",
             },
         ]
 

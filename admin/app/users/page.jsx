@@ -443,18 +443,18 @@ export default function UsersPage() {
                                                 />
                                             </div>
                                             <div>
-                                                <label className="block text-sm font-medium text-gray-700">
-                                                    Password * (min 15 characters)
+                                                <label className="block text-sm font-medium text-gray-700 mb-1">
+                                                    Password * (min 9 characters)
                                                 </label>
                                                 <input
                                                     type="password"
                                                     required
-                                                    minLength={15}
+                                                    minLength={9}
                                                     value={formData.password}
                                                     onChange={(e) =>
                                                         setFormData({ ...formData, password: e.target.value })
                                                     }
-                                                    placeholder="At least 15 characters"
+                                                    placeholder="At least 9 characters"
                                                     className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                                                 />
                                             </div>

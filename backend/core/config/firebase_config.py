@@ -4,7 +4,10 @@ import os
 from datetime import datetime
 
 # Initialize Firebase Admin SDK
-cred_path = os.path.join(os.path.dirname(__file__), "firebase-admin-key.json")
+cred_path = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    "firebase-admin-key.json",
+)
 
 try:
     cred = credentials.Certificate(cred_path)

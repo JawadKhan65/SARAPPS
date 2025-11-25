@@ -6,8 +6,8 @@ from flask_jwt_extended import (
     get_jwt_identity,
 )
 from werkzeug.security import generate_password_hash, check_password_hash
-from extensions import db, mail
-from models import User, AdminUser
+from core.extensions import db, mail
+from core.models import User, AdminUser
 from flask_mail import Message
 import os
 import uuid
@@ -18,13 +18,19 @@ import pyotp
 import qrcode
 from io import BytesIO
 import base64
-from firebase_config import (
+from core.config.firebase_config import (
     verify_firebase_token,
     create_firebase_user,
     delete_firebase_user,
 )
 
 auth_bp = Blueprint("auth", __name__)
+
+
+@auth_bp.route("/health", methods=["GET"])
+def health_check():
+    """Simple health check endpoint"""
+    return jsonify({"status": "ok", "message": "Backend is running"}), 200
 
 
 def send_email(recipient, subject, body, html=None):
@@ -163,12 +169,22 @@ def register():
     ), 201
 
 
-@auth_bp.route("/login", methods=["POST"])
+@auth_bp.route("/login", methods=["POST", "OPTIONS"])
 def login():
     """User login with device fingerprint and remember token"""
+    if request.method == "OPTIONS":
+        # Preflight is handled by Flask-CORS
+        return "", 204
+
     data = request.get_json()
+    current_app.logger.info(
+        f"Login attempt from {request.remote_addr} for email: {data.get('email') if data else 'N/A'}"
+    )
 
     if not data or not data.get("email") or not data.get("password"):
+        current_app.logger.warning(
+            f"Missing credentials in login request from {request.remote_addr}"
+        )
         return jsonify({"error": "Missing email or password"}), 400
 
     user = User.query.filter_by(email=data["email"]).first()
@@ -333,12 +349,12 @@ def verify_otp():
     # Get profile image from group if user is in a group
     profile_image_url = None
     if user.group_id:
-        from models import UserGroup
+        from core.models import UserGroup
 
         group = UserGroup.query.get(user.group_id)
         if group and group.profile_image_data:
             profile_image_url = (
-                f"http://localhost:5000/api/admin/groups/{group.id}/image"
+                f"{request.url_root.rstrip('/')}/api/admin/groups/{group.id}/image"
             )
 
     response = {
@@ -467,12 +483,12 @@ def login_original():
     # Get profile image from group if user is in a group
     profile_image_url = None
     if user.group_id:
-        from models import UserGroup
+        from core.models import UserGroup
 
         group = UserGroup.query.get(user.group_id)
         if group and group.profile_image_data:
             profile_image_url = (
-                f"http://localhost:5000/api/admin/groups/{group.id}/image"
+                f"{request.url_root.rstrip('/')}/api/admin/groups/{group.id}/image"
             )
 
     response = {
@@ -629,9 +645,9 @@ def logout():
     return jsonify({"message": "Logout successful"}), 200
 
 
-@auth_bp.route("/password-reset-request", methods=["POST"])
-def password_reset_request():
-    """Request password reset"""
+@auth_bp.route("/forgot-password", methods=["POST"])
+def forgot_password():
+    """Request password reset with OTP"""
     data = request.get_json()
 
     if not data or not data.get("email"):
@@ -640,38 +656,85 @@ def password_reset_request():
     user = User.query.filter_by(email=data["email"]).first()
 
     if not user:
-        # Don't reveal if email exists (security best practice)
-        return jsonify({"message": "If email exists, reset link sent"}), 200
+        return jsonify(
+            {"error": "Email not found. Please check your email address."}
+        ), 404
 
-    reset_token = secrets.token_urlsafe(32)
-    user.reset_token = reset_token
-    user.reset_token_expiry = datetime.utcnow() + timedelta(hours=1)
+    # Generate 6-digit OTP
+    otp_code = secrets.randbelow(1000000)
+    user.otp_code = str(otp_code).zfill(6)
+    user.otp_code_expiry = datetime.utcnow() + timedelta(minutes=10)
     db.session.commit()
 
-    reset_url = f"{request.host_url}reset-password?token={reset_token}"
-    send_email(
-        user.email,
-        "Password Reset Request",
-        f"Click the link to reset your password: {reset_url}",
-    )
+    current_app.logger.info(f"🔐 Password reset OTP for {user.email}: {user.otp_code}")
 
-    current_app.logger.info(f"Password reset requested for: {user.email}")
+    # Send OTP email
+    try:
+        html_content = render_template(
+            "password_reset_otp.html",
+            username=user.username or user.email.split("@")[0],
+            otp_code=user.otp_code,
+            expiry_minutes=10,
+        )
+        send_email(
+            user.email,
+            "STIP - Password Reset Verification Code",
+            f"Your password reset verification code is: {user.otp_code}\n\nThis code will expire in 10 minutes.",
+            html=html_content,
+        )
+        current_app.logger.info(f"✅ Password reset OTP sent to {user.email}")
+    except Exception as e:
+        current_app.logger.error(f"Failed to send password reset OTP: {str(e)}")
 
-    return jsonify({"message": "Reset link sent to email"}), 200
+    return jsonify({"message": "OTP sent to email", "email": user.email}), 200
 
 
-@auth_bp.route("/password-reset", methods=["POST"])
-def password_reset():
-    """Reset password with token"""
+@auth_bp.route("/verify-reset-otp", methods=["POST"])
+def verify_reset_otp():
+    """Verify OTP for password reset"""
     data = request.get_json()
 
-    if not data or not data.get("token") or not data.get("new_password"):
-        return jsonify({"error": "Missing token or password"}), 400
+    if not data or not data.get("email") or not data.get("otp_code"):
+        return jsonify({"error": "Email and OTP code required"}), 400
 
-    if len(data["new_password"]) < 15:
-        return jsonify({"error": "Password must be at least 15 characters"}), 400
+    user = User.query.filter_by(email=data["email"]).first()
 
-    user = User.query.filter_by(reset_token=data["token"]).first()
+    if not user:
+        return jsonify({"error": "Invalid credentials"}), 401
+
+    # Check OTP
+    if not user.otp_code or not user.otp_code_expiry:
+        return jsonify({"error": "No OTP request found"}), 401
+
+    if datetime.utcnow() > user.otp_code_expiry:
+        return jsonify({"error": "OTP has expired"}), 401
+
+    if user.otp_code != data["otp_code"]:
+        return jsonify({"error": "Invalid OTP code"}), 401
+
+    # Generate a temporary reset token (valid for 10 minutes)
+    reset_token = secrets.token_urlsafe(32)
+    user.reset_token = reset_token
+    user.reset_token_expiry = datetime.utcnow() + timedelta(minutes=10)
+    db.session.commit()
+
+    current_app.logger.info(f"✅ OTP verified for password reset: {user.email}")
+
+    return jsonify({"message": "OTP verified", "reset_token": reset_token}), 200
+
+
+@auth_bp.route("/reset-password", methods=["POST"])
+def reset_password():
+    """Reset password with verified token"""
+    data = request.get_json()
+
+    if not data or not data.get("reset_token") or not data.get("new_password"):
+        return jsonify({"error": "Reset token and new password required"}), 400
+
+    if len(data["new_password"]) < 9:
+        return jsonify({"error": "Password must be at least 9 characters"}), 400
+
+    user = User.query.filter_by(reset_token=data["reset_token"]).first()
 
     if (
         not user
@@ -680,16 +743,22 @@ def password_reset():
     ):
         return jsonify({"error": "Invalid or expired reset token"}), 401
 
+    # Update password
     user.password_hash = generate_password_hash(data["new_password"])
     user.reset_token = None
     user.reset_token_expiry = None
+    user.otp_code = None
+    user.otp_code_expiry = None
     db.session.commit()
 
+    # Send confirmation email
     send_email(
-        user.email, "Password Changed", "Your password has been successfully changed"
+        user.email,
+        "STIP - Password Changed Successfully",
+        "Your password has been successfully changed. If you did not make this change, please contact support immediately.",
     )
 
-    current_app.logger.info(f"Password reset for: {user.email}")
+    current_app.logger.info(f"Password reset completed for: {user.email}")
 
     return jsonify({"message": "Password reset successfully"}), 200
 

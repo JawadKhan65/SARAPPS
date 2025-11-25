@@ -8,8 +8,9 @@ gunicorn
 
 # Database
 psycopg2-binary
-pgvector
+pgvector  # PostgreSQL vector similarity search
 redis
+rq
 
 # Data Processing & ML
 numpy
@@ -36,4 +37,7 @@ bcrypt
 cryptography
 pyotp
 qrcode
-APSchedulerwaitress
+
+# Rate Limiting
+Flask-Limiter
+

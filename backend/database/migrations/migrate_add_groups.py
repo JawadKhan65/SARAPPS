@@ -4,7 +4,7 @@ This script adds user groups without dropping existing data
 """
 
 from sqlalchemy import text
-from extensions import db
+from core.extensions import db
 from app import create_app
 
 

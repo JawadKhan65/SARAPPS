@@ -4,8 +4,8 @@ import logging
 from datetime import datetime
 import uuid
 from flask import current_app
-from extensions import db
-from models import SoleImage, Crawler, CrawlerStatistics
+from core.extensions import db
+from core.models import SoleImage, Crawler, CrawlerStatistics
 from services.image_processor import ImageProcessor
 import hashlib
 import numpy as np
@@ -43,6 +43,42 @@ class ScraperService:
         """Calculate SHA256 hash of image for deduplication"""
         image_bytes = image_array.tobytes()
         return hashlib.sha256(image_bytes).hexdigest()
+
+    def normalize_url(self, url):
+        """Normalize URL for consistent duplicate detection"""
+        if not url:
+            return url
+
+        from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
+
+        # Parse URL
+        parsed = urlparse(url)
+
+        # Remove trailing slash from path
+        path = parsed.path.rstrip("/")
+
+        # Sort query parameters for consistency
+        query_params = parse_qs(parsed.query)
+        # Remove tracking parameters
+        tracking_params = ["utm_source", "utm_medium", "utm_campaign", "ref", "source"]
+        for param in tracking_params:
+            query_params.pop(param, None)
+
+        sorted_query = urlencode(sorted(query_params.items()), doseq=True)
+
+        # Rebuild URL
+        normalized = urlunparse(
+            (
+                parsed.scheme.lower(),
+                parsed.netloc.lower(),
+                path,
+                parsed.params,
+                sorted_query,
+                "",  # Remove fragment
+            )
+        )
+
+        return normalized
 
     def batch_insert_sole_images(self, products):
         """
@@ -100,13 +136,29 @@ class ScraperService:
                     )
                     continue
 
-                # Check if URL already exists
-                existing = SoleImage.query.filter_by(source_url=product["url"]).first()
+                # Normalize URL for consistent duplicate detection
+                normalized_url = self.normalize_url(product["url"])
+
+                # Check if normalized URL already exists in database
+                existing = SoleImage.query.filter_by(source_url=normalized_url).first()
+
+                # Also check original URL if different from normalized
+                if not existing and normalized_url != product["url"]:
+                    existing = SoleImage.query.filter_by(
+                        source_url=product["url"]
+                    ).first()
 
                 if existing:
                     result["duplicates"] += 1
-                    self.logger.info(f"Skipping duplicate URL: {product['url']}")
+                    self.logger.info(
+                        f"🔄 Duplicate product link detected: {product['url'][:80]}... "
+                        f"(Brand: {product.get('brand', 'Unknown')}, "
+                        f"Name: {product.get('product_name', 'Unknown')[:40]})"
+                    )
                     continue
+
+                # Store normalized URL
+                product["url"] = normalized_url
 
                 # Prepare processed image path
                 processed_path = os.path.join(
@@ -226,6 +278,19 @@ class ScraperService:
                 # Check for hash duplicates within batch
                 if image_hash in processed_hashes:
                     result["duplicates"] += 1
+                    self.logger.info(
+                        f"🔄 Duplicate image hash in batch: {product.get('url', 'unknown')[:80]}..."
+                    )
+                    continue
+
+                # Check if hash already exists in database
+                existing_hash = SoleImage.query.filter_by(image_hash=image_hash).first()
+                if existing_hash:
+                    result["duplicates"] += 1
+                    self.logger.info(
+                        f"🔄 Duplicate image hash in database: {product.get('url', 'unknown')[:80]}... "
+                        f"(matches existing: {existing_hash.source_url[:60]}...)"
+                    )
                     continue
 
                 processed_hashes.add(image_hash)
@@ -276,7 +341,7 @@ class ScraperService:
                 sole_image = SoleImage(
                     id=str(uuid.uuid4()),
                     crawler_id=self.crawler_id,
-                    source_url=product["url"],
+                    source_url=normalized_url,  # Use normalized URL for consistency
                     brand=product.get("brand", "Unknown").strip()[:100],
                     product_type=product.get("product_type", "Unknown").strip()[:100],
                     product_name=product.get("product_name", "").strip()[:255],
@@ -294,6 +359,16 @@ class ScraperService:
                     ),
                     lbp_histogram=process_result["features"]["lbp"].tobytes()
                     if process_result["features"].get("lbp") is not None
+                    else None,
+                    # pgvector embeddings for fast similarity search
+                    clip_embedding=process_result.get("clip_vector").tolist()
+                    if process_result.get("clip_vector") is not None
+                    else None,
+                    edge_embedding=process_result.get("edge_vector").tolist()
+                    if process_result.get("edge_vector") is not None
+                    else None,
+                    texture_embedding=process_result.get("texture_vector").tolist()
+                    if process_result.get("texture_vector") is not None
                     else None,
                     # Metadata
                     image_width=image_width,
@@ -317,11 +392,26 @@ class ScraperService:
                 result["inserted"] += 1
 
             except Exception as e:
+                # Rollback session if there's an error to prevent cascading failures
+                db.session.rollback()
+
                 result["errors"] += 1
+                error_msg = str(e)
+
+                # Simplify error message for common constraint violations
+                if "UniqueViolation" in error_msg and "image_hash" in error_msg:
+                    error_msg = "Duplicate image hash (same image already exists)"
+                    result["duplicates"] += 1
+                    result["inserted"] = max(0, result["inserted"] - 1)  # Adjust count
+                elif "UniqueViolation" in error_msg and "source_url" in error_msg:
+                    error_msg = "Duplicate source URL (product already exists)"
+                    result["duplicates"] += 1
+                    result["inserted"] = max(0, result["inserted"] - 1)  # Adjust count
+
                 result["error_details"].append(
-                    f"Product {idx} ({product.get('url', 'unknown')}): {str(e)}"
+                    f"Product {idx} ({product.get('url', 'unknown')[:60]}...): {error_msg}"
                 )
-                self.logger.error(f"Error processing product {idx}: {str(e)}")
+                self.logger.warning(f"⚠️  Skipping product {idx}: {error_msg}")
 
         # Calculate uniqueness percentage
         processed_count = (
@@ -352,25 +442,49 @@ class ScraperService:
                 f"Inserted: {result['inserted']}, Duplicates: {result['duplicates']}"
             )
 
-        # Commit to database
+        # Commit to database in batch for better performance
         if result["inserted"] > 0:
             try:
+                # Use bulk insert optimization if available
+                self.logger.debug(
+                    f"Committing batch of {result['inserted']} records..."
+                )
                 db.session.commit()
 
                 # Update crawler statistics
                 self._update_crawler_stats(result["inserted"], unique_count)
 
                 self.logger.info(
-                    f"Batch insertion complete: {result['inserted']} inserted, "
+                    f"✅ Batch insertion complete: {result['inserted']} inserted, "
                     f"{result['duplicates']} duplicates, "
                     f"{result['errors']} errors, "
                     f"uniqueness {result['uniqueness_percent']:.1f}%"
                 )
             except Exception as e:
                 db.session.rollback()
-                self.logger.error(f"Failed to commit batch: {str(e)}")
+
+                error_msg = str(e)
+                # Check if it's a constraint violation that slipped through
+                if "UniqueViolation" in error_msg:
+                    self.logger.error(
+                        f"❌ Constraint violation during commit (some duplicates not caught in pre-check): {error_msg[:200]}"
+                    )
+                    # Some records might have been inserted before the error
+                    # Treat this batch as having more duplicates
+                    result["duplicates"] += result["inserted"]
+                    result["inserted"] = 0
+                else:
+                    self.logger.error(
+                        f"❌ Failed to commit batch: {error_msg[:200]}", exc_info=True
+                    )
+
                 result["errors"] += result["inserted"]
                 result["inserted"] = 0
+                result["error_details"].append(
+                    f"Database commit failed: {error_msg[:100]}"
+                )
+        else:
+            self.logger.info("No new records to commit in this batch")
 
         return result
 

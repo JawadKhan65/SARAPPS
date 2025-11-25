@@ -1,13 +1,26 @@
 from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from datetime import datetime
-import asyncio
-from extensions import db
-from models import Crawler, CrawlerRun, CrawlerStatistics, AdminUser
-from services.scraper_manager import get_scraper_manager, cleanup_scraper_manager
+from redis import Redis
+from rq import Queue
+from core.extensions import db
+from core.models import Crawler, CrawlerRun, CrawlerStatistics, AdminUser
+from jobs.tasks import run_crawler_job, cancel_crawler_job, get_crawler_job_status
+import os
 import uuid
 
 crawlers_bp = Blueprint("crawlers", __name__)
+
+
+# Redis and RQ setup
+def get_redis_connection():
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    return Redis.from_url(redis_url)
+
+
+def get_crawler_queue():
+    redis_conn = get_redis_connection()
+    return Queue("crawlers", connection=redis_conn)
 
 
 @crawlers_bp.route("", methods=["GET", "OPTIONS"])
@@ -128,10 +141,27 @@ def get_crawler(crawler_id):
     ), 200
 
 
+@crawlers_bp.route("/<crawler_id>/job-status", methods=["GET"])
+@jwt_required()
+def get_job_status(crawler_id):
+    """Get the status of a crawler background job from Redis"""
+    try:
+        status = get_crawler_job_status(crawler_id)
+
+        if not status:
+            return jsonify({"error": "No job status found"}), 404
+
+        return jsonify({"status": status}), 200
+
+    except Exception as e:
+        current_app.logger.error(f"Error getting job status: {str(e)}")
+        return jsonify({"error": "Failed to get job status"}), 500
+
+
 @crawlers_bp.route("/<crawler_id>/start", methods=["POST", "OPTIONS"])
 @jwt_required()
 def start_crawler(crawler_id):
-    """Start a crawler run instantly"""
+    """Start a crawler run as a background job"""
     if request.method == "OPTIONS":
         return "", 204
 
@@ -159,29 +189,27 @@ def start_crawler(crawler_id):
         ), 409
 
     try:
-        # Get scraper manager and start
-        scraper_manager = get_scraper_manager(crawler_id, admin_id)
+        # Enqueue crawler job
+        queue = get_crawler_queue()
+        job = queue.enqueue(
+            run_crawler_job,
+            crawler_id,
+            admin_id,
+            "manual",
+            job_timeout="2h",  # 2 hour timeout
+            result_ttl=86400,  # Keep results for 24 hours
+        )
 
-        # Run in background thread
-        def run_scraper():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(scraper_manager.start_scraper("manual"))
-            loop.close()
-            cleanup_scraper_manager(crawler_id)
-
-        import threading
-
-        thread = threading.Thread(target=run_scraper, daemon=True)
-        thread.start()
-
-        current_app.logger.info(f"🚀 Crawler started: {crawler.name}")
+        current_app.logger.info(
+            f"🚀 Crawler job enqueued: {crawler.name} (Job ID: {job.id})"
+        )
 
         return (
             jsonify(
                 {
-                    "message": "Crawler started",
+                    "message": "Crawler job started",
                     "crawler_id": crawler_id,
+                    "job_id": job.id,
                     "run_type": "manual",
                 }
             ),
@@ -196,7 +224,7 @@ def start_crawler(crawler_id):
 @crawlers_bp.route("/<crawler_id>/stop", methods=["POST", "OPTIONS"])
 @jwt_required()
 def stop_crawler(crawler_id):
-    """Stop/cancel a running crawler"""
+    """Stop/cancel a running crawler job"""
     if request.method == "OPTIONS":
         return "", 204
 
@@ -210,28 +238,24 @@ def stop_crawler(crawler_id):
         return jsonify({"error": "Crawler is not running"}), 409
 
     try:
-        # Request cancellation via scraper manager
-        scraper_manager = get_scraper_manager(crawler_id, admin_id)
-        success = scraper_manager.cancel_run("Manual cancellation by admin")
+        # Cancel the background job
+        result = cancel_crawler_job(crawler_id)
 
-        if success:
-            current_app.logger.info(f"🛑 Crawler stop requested: {crawler.name}")
-            return (
-                jsonify(
-                    {
-                        "message": "Crawler stop requested",
-                        "crawler_id": crawler_id,
-                        "note": "Crawler will stop after current batch completes",
-                    }
-                ),
-                200,
-            )
-        else:
-            return jsonify({"error": "Failed to request stop"}), 500
+        current_app.logger.info(f"🛑 Crawler job cancelled: {crawler.name}")
+
+        return (
+            jsonify(
+                {
+                    "message": "Crawler job cancelled",
+                    "crawler_id": crawler_id,
+                }
+            ),
+            200,
+        )
 
     except Exception as e:
         current_app.logger.error(f"Error stopping crawler: {str(e)}")
-        return jsonify({"error": "Failed to stop crawler"}), 500
+        return jsonify({"error": f"Failed to stop crawler: {str(e)}"}), 500
 
 
 @crawlers_bp.route("/<crawler_id>/toggle", methods=["PUT", "OPTIONS"])

@@ -22,13 +22,13 @@ logger = logging.getLogger(__name__)
 
 
 class ZapposScraper(BatchProcessingMixin):
-    def __init__(self, max_pages: int = 1):
+    def __init__(self, max_pages: int = None):
         self.base_url = "https://www.zappos.com/men-shoes/.zso?t=men%20shoes"
-        self.max_pages = max_pages
+        self.max_pages = max_pages  # None = all pages (production mode)
         self.clip = SoleDetectorCLIP()
         self.products = []  # Store scraped products
         logger.info(
-            f"✅ ZapposScraper initialized with CLIP model (max_pages={max_pages})"
+            f"✅ ZapposScraper initialized with CLIP model (max_pages={max_pages or 'unlimited'})"
         )
 
     async def run(self, batch_callback=None, batch_size: int = 20, is_cancelled=None):
@@ -91,7 +91,7 @@ class ZapposScraper(BatchProcessingMixin):
             next_page_url = self.base_url
             global_idx = 1
 
-            while next_page_url and current_page <= self.max_pages and not should_stop:
+            while next_page_url and (self.max_pages is None or current_page <= self.max_pages) and not should_stop:
                 # Check for cancellation at page boundary
                 if is_cancelled and is_cancelled():
                     logger.warning(
@@ -800,8 +800,8 @@ class ZapposScraper(BatchProcessingMixin):
 
 async def main():
     """Entry point"""
-    # Set max_pages=1 for testing, increase for production
-    scraper = ZapposScraper(max_pages=1)
+    # Production: scrape all pages (no limit)
+    scraper = ZapposScraper(max_pages=None)
     await scraper.run()
 
 

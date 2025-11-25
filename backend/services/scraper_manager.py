@@ -14,8 +14,8 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 
-from extensions import db
-from models import Crawler, CrawlerRun, SoleImage
+from core.extensions import db
+from core.models import Crawler, CrawlerRun, SoleImage
 from services.scraper_service import ScraperService
 
 logger = logging.getLogger(__name__)

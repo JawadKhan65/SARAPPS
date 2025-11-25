@@ -6,8 +6,9 @@ Falls back to filesystem if binary data is not available (legacy support).
 """
 
 from flask import Blueprint, send_file, jsonify, Response
-from models import SoleImage, UploadedImage
-from extensions import db
+from core.models import SoleImage, UploadedImage
+from core.extensions import db
+from werkzeug.http import http_date
 import io
 import logging
 
@@ -37,14 +38,27 @@ def get_sole_image(image_id):
             
             logger.debug(f"Serving processed image from database: {image_id} ({len(sole_image.processed_image_data)} bytes)")
             
-            return Response(
+            response = Response(
                 sole_image.processed_image_data,
-                mimetype=mimetype,
-                headers={
-                    'Content-Disposition': f'inline; filename="{image_id}.{image_format.lower()}"',
-                    'Cache-Control': 'public, max-age=31536000'  # Cache for 1 year
-                }
+                mimetype=mimetype
             )
+            
+            # Aggressive caching headers for immutable sole images
+            response.headers['Content-Disposition'] = f'inline; filename="{image_id}.{image_format.lower()}"'
+            response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'  # Cache for 1 year
+            response.headers['ETag'] = f'"{sole_image.image_hash[:32]}"'  # Use hash as ETag
+            
+            # Set Last-Modified header
+            if sole_image.processed_at:
+                response.headers['Last-Modified'] = http_date(
+                    int(sole_image.processed_at.timestamp())
+                )
+            elif sole_image.crawled_at:
+                response.headers['Last-Modified'] = http_date(
+                    int(sole_image.crawled_at.timestamp())
+                )
+            
+            return response
         
         elif sole_image.original_image_data:
             image_format = sole_image.image_format or 'PNG'
@@ -52,14 +66,22 @@ def get_sole_image(image_id):
             
             logger.debug(f"Serving original image from database: {image_id} ({len(sole_image.original_image_data)} bytes)")
             
-            return Response(
+            response = Response(
                 sole_image.original_image_data,
-                mimetype=mimetype,
-                headers={
-                    'Content-Disposition': f'inline; filename="{image_id}.{image_format.lower()}"',
-                    'Cache-Control': 'public, max-age=31536000'
-                }
+                mimetype=mimetype
             )
+            
+            # Aggressive caching headers
+            response.headers['Content-Disposition'] = f'inline; filename="{image_id}.{image_format.lower()}"'
+            response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+            response.headers['ETag'] = f'"{sole_image.image_hash[:32]}"'
+            
+            if sole_image.crawled_at:
+                response.headers['Last-Modified'] = http_date(
+                    int(sole_image.crawled_at.timestamp())
+                )
+            
+            return response
         
         # Fallback to filesystem (legacy)
         elif sole_image.processed_image_path:

@@ -166,6 +166,11 @@ class Military1stScraper(BatchProcessingMixin):
                         href = await link_el.get_attribute("href")
                         logger.debug(f"Item {i}: href = {href}")
                         if href and href != "javascript:void(0)":
+                            # Fix malformed URLs from website (httpps://, htttps://, etc.)
+                            href = href.replace("httpps://", "https://")
+                            href = href.replace("htttps://", "https://")
+                            href = href.replace("httttp://", "http://")
+                            
                             # Normalize to absolute URL
                             if href.startswith("/"):
                                 href = "https://www.military1st.eu" + href
@@ -221,9 +226,9 @@ class Military1stScraper(BatchProcessingMixin):
             )
             await asyncio.sleep(1)
 
-            # Extract product name from span.page-title
+            # Extract product name from h1.page-title span.base
             try:
-                title_el = page.locator("span.page-title").first
+                title_el = page.locator("h1.page-title span.base").first
                 if await title_el.count() > 0:
                     title = await title_el.text_content()
                     result["product_name"] = title.strip() if title else "Unknown"

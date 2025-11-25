@@ -48,6 +48,15 @@ export const authAPI = {
     verifyOtp: (email, otpCode, rememberLogin = false) =>
         api.post('/auth/verify-otp', { email, otp_code: otpCode, remember_login: rememberLogin }),
 
+    forgotPassword: (email) =>
+        api.post('/auth/forgot-password', { email }),
+
+    verifyResetOTP: (email, otpCode) =>
+        api.post('/auth/verify-reset-otp', { email, otp_code: otpCode }),
+
+    resetPassword: (resetToken, newPassword) =>
+        api.post('/auth/reset-password', { reset_token: resetToken, new_password: newPassword }),
+
     refresh: () => api.post('/auth/refresh'),
 
     logout: () => api.post('/auth/logout'),
@@ -82,6 +91,9 @@ export const userAPI = {
 
     getSoleImage: (soleImageId) =>
         api.get(`/user/sole-image/${soleImageId}`),
+
+    getSoleImageOriginal: (soleImageId) =>
+        api.get(`/user/sole-image/${soleImageId}/original`),
 };
 
 export const matchesAPI = {

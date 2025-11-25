@@ -19,6 +19,9 @@ export default function CrawlersPage() {
     const [selectedCrawler, setSelectedCrawler] = useState(null);
     const [expandedCrawlers, setExpandedCrawlers] = useState(new Set());
     const [configModal, setConfigModal] = useState(null);
+    const [jobStatuses, setJobStatuses] = useState({});
+    const [workerHealth, setWorkerHealth] = useState(null);
+    const [startingCrawlers, setStartingCrawlers] = useState(new Set());
 
     // Check authentication in useEffect to avoid rendering errors
     useEffect(() => {
@@ -32,10 +35,15 @@ export default function CrawlersPage() {
 
         loadCrawlers();
         loadStats();
+        loadWorkerHealth();
+        
         const interval = setInterval(() => {
             loadCrawlers();
             loadStats();
+            loadWorkerHealth();
+            loadJobStatuses();
         }, 3000); // Refresh every 3s
+        
         return () => clearInterval(interval);
     }, [isAuthenticated]);
 
@@ -64,12 +72,60 @@ export default function CrawlersPage() {
         }
     };
 
+    const loadWorkerHealth = async () => {
+        try {
+            const response = await adminAPI.getWorkersHealth();
+            setWorkerHealth(response.data);
+        } catch (err) {
+            console.error('Failed to load worker health:', err);
+        }
+    };
+
+    const loadJobStatuses = async () => {
+        // Load job status for all running crawlers
+        const runningCrawlers = crawlers.filter(c => c.is_running);
+        const statusPromises = runningCrawlers.map(async (crawler) => {
+            try {
+                const response = await adminAPI.getCrawlerJobStatus(crawler.id);
+                return { id: crawler.id, status: response.data };
+            } catch (err) {
+                console.error(`Failed to load job status for ${crawler.id}:`, err);
+                return { id: crawler.id, status: null };
+            }
+        });
+
+        const statuses = await Promise.all(statusPromises);
+        const statusMap = {};
+        statuses.forEach(({ id, status }) => {
+            if (status) statusMap[id] = status;
+        });
+        setJobStatuses(statusMap);
+    };
+
     const handleStartCrawler = async (crawlerId) => {
+        // Add to starting set to show loading state
+        setStartingCrawlers(prev => new Set(prev).add(crawlerId));
+        
         try {
             await adminAPI.startCrawler(crawlerId);
-            loadCrawlers();
+            
+            // Start polling job status immediately
+            setTimeout(() => {
+                loadJobStatuses();
+            }, 1000);
+            
+            await loadCrawlers();
         } catch (err) {
-            setError('Failed to start crawler: ' + err.response?.data?.error);
+            setError('Failed to start crawler: ' + (err.response?.data?.error || err.message));
+        } finally {
+            // Remove from starting set after a delay
+            setTimeout(() => {
+                setStartingCrawlers(prev => {
+                    const newSet = new Set(prev);
+                    newSet.delete(crawlerId);
+                    return newSet;
+                });
+            }, 2000);
         }
     };
 
@@ -140,9 +196,28 @@ export default function CrawlersPage() {
                 {/* Header */}
                 <div className="mb-8">
                     <div className="flex justify-between items-center mb-2">
-                        <h1 className="text-4xl font-bold text-gray-900">
-                            Data Crawlers
-                        </h1>
+                        <div>
+                            <h1 className="text-4xl font-bold text-gray-900 flex items-center gap-3">
+                                Data Crawlers
+                                {workerHealth && (
+                                    <span className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-sm font-medium ${
+                                        workerHealth.healthy && workerHealth.workers > 0
+                                            ? 'text-green-700 bg-green-50 border border-green-200'
+                                            : 'text-red-700 bg-red-50 border border-red-200'
+                                    }`}>
+                                        <span className={`w-2 h-2 rounded-full ${
+                                            workerHealth.healthy && workerHealth.workers > 0
+                                                ? 'bg-green-500 animate-pulse'
+                                                : 'bg-red-500'
+                                        }`}></span>
+                                        {workerHealth.workers || 0} Worker{workerHealth.workers !== 1 ? 's' : ''}
+                                    </span>
+                                )}
+                            </h1>
+                            <p className="text-gray-600 mt-1">
+                                Manage and monitor your data collection pipelines
+                            </p>
+                        </div>
                         <button
                             onClick={() => router.push('/')}
                             className="px-4 py-2 bg-white text-gray-700 rounded-lg shadow-sm hover:shadow-md transition-shadow border border-gray-200"
@@ -150,9 +225,14 @@ export default function CrawlersPage() {
                             ← Dashboard
                         </button>
                     </div>
-                    <p className="text-gray-600">
-                        Manage and monitor your data collection pipelines
-                    </p>
+                    {workerHealth && !workerHealth.healthy && (
+                        <div className="mt-3 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-center gap-2">
+                            <AlertCircle className="w-4 h-4 text-amber-600" />
+                            <span className="text-sm text-amber-700">
+                                Warning: No workers are currently running. Crawlers cannot start without active workers.
+                            </span>
+                        </div>
+                    )}
                 </div>
 
                 {/* Stats Overview */}
@@ -207,6 +287,8 @@ export default function CrawlersPage() {
                             <CrawlerCard
                                 key={crawler.id}
                                 crawler={crawler}
+                                jobStatus={jobStatuses[crawler.id]}
+                                isStarting={startingCrawlers.has(crawler.id)}
                                 expanded={expandedCrawlers.has(crawler.id)}
                                 onToggleExpand={() => toggleExpanded(crawler.id)}
                                 onStart={() => handleStartCrawler(crawler.id)}
@@ -359,7 +441,13 @@ function StatCard({ icon, label, value, color }) {
     );
 }
 
-function CrawlerCard({ crawler, expanded, onToggleExpand, onStart, onStop, onSettings, getStatusColor, getStatusIcon, getStatusText }) {
+function CrawlerCard({ crawler, jobStatus, isStarting, expanded, onToggleExpand, onStart, onStop, onSettings, getStatusColor, getStatusIcon, getStatusText }) {
+    // Get real-time progress from job status
+    const progress = jobStatus?.progress;
+    const heartbeat = jobStatus?.heartbeat;
+    const isStalled = jobStatus?.heartbeat_stale === true;
+    const errorDetails = jobStatus?.error_details;
+    
     return (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden hover:shadow-md transition-all">
             {/* Main Card Content */}
@@ -381,6 +469,12 @@ function CrawlerCard({ crawler, expanded, onToggleExpand, onStart, onStop, onSet
                                 {getStatusIcon(crawler)}
                                 {getStatusText(crawler)}
                             </span>
+                            {isStalled && (
+                                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-sm font-medium text-amber-600 bg-amber-50 border border-amber-200">
+                                    <AlertCircle className="w-4 h-4" />
+                                    Stalled
+                                </span>
+                            )}
                         </div>
 
                         <div className="ml-8 space-y-2">
@@ -416,26 +510,38 @@ function CrawlerCard({ crawler, expanded, onToggleExpand, onStart, onStop, onSet
 
                     {/* Right: Actions */}
                     <div className="flex items-center gap-2 ml-4">
-                        {crawler.is_running ? (
-                            <button
-                                onClick={onStop}
-                                className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors shadow-sm font-medium"
-                            >
-                                <Pause className="w-4 h-4" />
-                                Cancel
-                            </button>
+                        {crawler.is_running || isStarting ? (
+                            <>
+                                <button
+                                    onClick={onStop}
+                                    disabled={isStarting}
+                                    className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors shadow-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    <Pause className="w-4 h-4" />
+                                    Cancel
+                                </button>
+                            </>
                         ) : (
                             <button
                                 onClick={onStart}
-                                disabled={!crawler.is_active}
+                                disabled={!crawler.is_active || isStarting}
                                 className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors shadow-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
                             >
-                                <Play className="w-4 h-4" />
-                                Start
+                                {isStarting ? (
+                                    <>
+                                        <Loader2 className="w-4 h-4 animate-spin" />
+                                        Starting...
+                                    </>
+                                ) : (
+                                    <>
+                                        <Play className="w-4 h-4" />
+                                        Start
+                                    </>
+                                )}
                             </button>
                         )}
                         <button
-                            onClick={() => onSettings(crawler)}
+                            onClick={onSettings}
                             className="p-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
                         >
                             <Settings className="w-5 h-5" />
@@ -443,8 +549,40 @@ function CrawlerCard({ crawler, expanded, onToggleExpand, onStart, onStop, onSet
                     </div>
                 </div>
 
-                {/* Progress Bar */}
-                {crawler.is_running && (
+                {/* Real-time Progress (from job status) */}
+                {crawler.is_running && progress && (
+                    <div className="ml-8 mt-4">
+                        <div className="flex items-center justify-between text-sm mb-2">
+                            <div className="flex items-center gap-2">
+                                <span className="text-gray-600 font-medium">Progress</span>
+                                {heartbeat && (
+                                    <span className="flex items-center gap-1 text-xs text-green-600">
+                                        <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                                        Live
+                                    </span>
+                                )}
+                            </div>
+                            <span className="text-gray-900 font-semibold">
+                                {progress.current || 0} / {progress.total || 0} items • {progress.percentage || 0}%
+                            </span>
+                        </div>
+                        <div className="w-full bg-gray-200 rounded-full h-2.5 overflow-hidden mb-2">
+                            <div
+                                className="bg-gradient-to-r from-blue-500 to-green-500 h-2.5 rounded-full transition-all duration-500"
+                                style={{ width: `${Math.min(progress.percentage || 0, 100)}%` }}
+                            />
+                        </div>
+                        {progress.message && (
+                            <p className="text-xs text-gray-600 flex items-center gap-1.5">
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                                {progress.message}
+                            </p>
+                        )}
+                    </div>
+                )}
+                
+                {/* Fallback progress bar (database values) */}
+                {crawler.is_running && !progress && (
                     <div className="ml-8 mt-4">
                         <div className="flex items-center justify-between text-sm mb-2">
                             <span className="text-gray-600 font-medium">Progress</span>
@@ -464,7 +602,8 @@ function CrawlerCard({ crawler, expanded, onToggleExpand, onStart, onStop, onSet
 
             {/* Expanded Details */}
             {expanded && (
-                <div className="border-t border-gray-200 bg-gray-50 p-6">
+                <div className="border-t border-gray-200 bg-gray-50 p-6 space-y-4">
+                    {/* Statistics Grid */}
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                         <DetailItem label="Total Runs" value={crawler.total_runs || 0} />
                         <DetailItem label="Duplicates" value={(crawler.duplicate_count || 0).toLocaleString()} />
@@ -491,8 +630,77 @@ function CrawlerCard({ crawler, expanded, onToggleExpand, onStart, onStop, onSet
                         />
                     </div>
 
-                    {crawler.last_error && (
-                        <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-lg">
+                    {/* Real-time Job Status Info */}
+                    {jobStatus && (
+                        <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                            <div className="flex items-start gap-2">
+                                <Clock className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+                                <div className="flex-1">
+                                    <p className="font-medium text-blue-900 mb-2">Job Status</p>
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                                        <div>
+                                            <span className="text-blue-600 font-medium">Job ID:</span>
+                                            <p className="text-blue-900 font-mono text-xs">{jobStatus.job_id?.substring(0, 8)}...</p>
+                                        </div>
+                                        <div>
+                                            <span className="text-blue-600 font-medium">Status:</span>
+                                            <p className="text-blue-900 capitalize">{jobStatus.status}</p>
+                                        </div>
+                                        {jobStatus.attempt && (
+                                            <div>
+                                                <span className="text-blue-600 font-medium">Attempt:</span>
+                                                <p className="text-blue-900">{jobStatus.attempt} / {jobStatus.max_attempts}</p>
+                                            </div>
+                                        )}
+                                        {jobStatus.started_at && (
+                                            <div>
+                                                <span className="text-blue-600 font-medium">Started:</span>
+                                                <p className="text-blue-900">{new Date(jobStatus.started_at).toLocaleTimeString()}</p>
+                                            </div>
+                                        )}
+                                    </div>
+                                    {heartbeat && (
+                                        <div className="mt-2 pt-2 border-t border-blue-200">
+                                            <span className="text-blue-600 font-medium text-sm flex items-center gap-2">
+                                                <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                                                Last Heartbeat: {new Date(heartbeat.last_beat).toLocaleTimeString()}
+                                            </span>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Error Details (from job status) */}
+                    {errorDetails && (
+                        <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
+                            <div className="flex items-start gap-2">
+                                <XCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+                                <div className="flex-1">
+                                    <p className="font-medium text-red-900 mb-2">Job Error Details</p>
+                                    <div className="space-y-2 text-sm">
+                                        {jobStatus.error_message && (
+                                            <div>
+                                                <span className="text-red-600 font-medium">Message:</span>
+                                                <p className="text-red-900 mt-1">{jobStatus.error_message}</p>
+                                            </div>
+                                        )}
+                                        {jobStatus.error_category && (
+                                            <div className="flex items-center gap-4">
+                                                <span className="text-red-600 font-medium">Category: <span className="text-red-900 font-normal capitalize">{jobStatus.error_category}</span></span>
+                                                <span className="text-red-600 font-medium">Retryable: <span className="text-red-900 font-normal">{jobStatus.error_retryable === 'True' ? 'Yes' : 'No'}</span></span>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Legacy Error (from database) */}
+                    {crawler.last_error && !errorDetails && (
+                        <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
                             <div className="flex items-start gap-2">
                                 <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
                                 <div>

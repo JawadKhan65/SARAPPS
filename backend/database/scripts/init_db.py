@@ -6,7 +6,7 @@ Drops and recreates all tables with the new user groups feature
 import os
 import sys
 from sqlalchemy import text
-from extensions import db
+from core.extensions import db
 from app import create_app
 
 
@@ -43,7 +43,7 @@ def init_database():
         try:
             # Import here to avoid circular imports
             from werkzeug.security import generate_password_hash
-            from models import AdminUser
+            from core.models import AdminUser
 
             # Check if admin exists
             admin = AdminUser.query.filter_by(email="jawadkhan8464@gmail.com").first()
@@ -130,7 +130,7 @@ def init_database():
 
         print("\n📋 Step 6: Seeding crawlers...")
         try:
-            from models import Crawler
+            from core.models import Crawler
             import uuid
 
             # Define all available crawlers

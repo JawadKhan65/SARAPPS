@@ -683,7 +683,7 @@ async def main():
 
     try:
         # Scrape all pages
-        # Set max_pages=2 for testing, None for all pages
+        # Production: scrape all pages
         await scraper.scrape(max_pages=None)
 
         # Save results

@@ -13,8 +13,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.executors.pool import ThreadPoolExecutor
 
-from extensions import db
-from models import Crawler
+from core.extensions import db
+from core.models import Crawler
 from services.scraper_manager import get_scraper_manager, cleanup_scraper_manager
 
 logger = logging.getLogger(__name__)

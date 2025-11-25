@@ -3,7 +3,7 @@ Add OTP columns to users table
 """
 
 from main import app
-from extensions import db
+from core.extensions import db
 
 with app.app_context():
     try:

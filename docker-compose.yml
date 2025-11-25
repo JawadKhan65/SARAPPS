@@ -3,7 +3,7 @@ version: '3.9'
 services:
   # PostgreSQL Database with pgvector support
   postgres:
-    image: pgvector/pgvector:pg15-latest
+    image: pgvector/pgvector:pg17
     container_name: stip_postgres
     environment:
       POSTGRES_USER: stip_user
@@ -43,7 +43,7 @@ services:
   # Flask Backend
   backend:
     build:
-      context: ./stip-backend
+      context: ./backend
       dockerfile: Dockerfile
     container_name: stip_backend
     environment:
@@ -67,7 +67,7 @@ services:
       redis:
         condition: service_healthy
     volumes:
-      - ./stip-backend:/app
+      - ./backend:/app
       - ./uploads:/app/uploads
       - ./logs:/app/logs
     healthcheck:
@@ -82,7 +82,7 @@ services:
   # Frontend (React/Next.js) - Port 443
   frontend:
     build:
-      context: ./stip-frontend
+      context: ./frontend
       dockerfile: Dockerfile
       args:
         REACT_APP_API_URL: ${REACT_APP_API_URL:-http://localhost:5000}
@@ -96,8 +96,8 @@ services:
     depends_on:
       - backend
     volumes:
-      - ./stip-frontend:/app
-      - ./stip-frontend/node_modules:/app/node_modules
+      - ./frontend:/app
+      - ./frontend/node_modules:/app/node_modules
     networks:
       - stip_network
     restart: unless-stopped
@@ -105,7 +105,7 @@ services:
   # Admin Dashboard (React/Next.js) - Port 8443
   admin:
     build:
-      context: ./stip-admin
+      context: ./admin
       dockerfile: Dockerfile
       args:
         REACT_APP_API_URL: ${REACT_APP_API_URL:-http://localhost:5000}
@@ -119,11 +119,35 @@ services:
     depends_on:
       - backend
     volumes:
-      - ./stip-admin:/app
-      - ./stip-admin/node_modules:/app/node_modules
+      - ./admin:/app
+      - ./admin/node_modules:/app/node_modules
     networks:
       - stip_network
     restart: unless-stopped
+
+  # RQ Worker for Background Jobs (Crawlers)
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: stip_worker
+    command: python worker.py
+    environment:
+      FLASK_ENV: ${FLASK_ENV:-production}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://stip_user:stip_password_change_me@postgres:5432/stip_production}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change_this_secret_key_in_production}
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./backend:/app
+      - ./uploads:/app/uploads
+    networks:
+      - stip_network
+    restart: unless-stopped
+    deploy:
+      replicas: 2  # Run 2 workers for better concurrency
 
   # Nginx Reverse Proxy
   nginx:

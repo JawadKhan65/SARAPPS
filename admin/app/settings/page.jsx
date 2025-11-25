@@ -150,7 +150,7 @@ export default function SettingsPage() {
                                             setPasswordData({ ...passwordData, new_password: e.target.value })
                                         }
                                         className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-600 outline-none"
-                                        placeholder="Enter new password (min 15 characters)"
+                                        placeholder="Enter new password (min 9 characters)"
                                     />
                                 </div>
 

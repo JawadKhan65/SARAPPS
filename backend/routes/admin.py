@@ -2,9 +2,9 @@ from flask import Blueprint, request, jsonify, current_app, render_template
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime
-from extensions import db, mail
+from core.extensions import db, mail
 from flask_mail import Message
-from models import AdminUser, User, CrawlerStatistics, SystemConfig, Crawler, UserGroup
+from core.models import AdminUser, User, CrawlerStatistics, SystemConfig, Crawler, UserGroup
 from services.scraper_manager import get_scraper_manager, cleanup_scraper_manager
 from utils.schedule_helper import (
     cron_to_human,
@@ -15,6 +15,7 @@ from utils.schedule_helper import (
 import asyncio
 import uuid
 import os
+from jobs.tasks import get_crawler_job_status, get_worker_health
 
 admin_bp = Blueprint("admin", __name__)
 
@@ -222,7 +223,7 @@ def delete_user(user_id):
 
     try:
         import os
-        from models import UploadedImage, MatchResult
+        from core.models import UploadedImage, MatchResult
 
         user_email = user.email
 
@@ -985,7 +986,7 @@ def get_dashboard_stats():
         total_users = User.query.count()
         active_users = User.query.filter_by(is_active=True).count()
 
-        from models import MatchResult
+        from core.models import MatchResult
 
         total_matches = MatchResult.query.count()
 
@@ -1092,7 +1093,7 @@ def get_match_stats():
         return jsonify({"error": "Session expired"}), 401
 
     try:
-        from models import MatchResult
+        from core.models import MatchResult
 
         total_matches = MatchResult.query.count()
 
@@ -1156,7 +1157,7 @@ def get_crawler_stats():
         return jsonify({"error": "Session expired"}), 401
 
     try:
-        from models import SoleImage, CrawlerRun
+        from core.models import SoleImage, CrawlerRun
 
         total_items = SoleImage.query.count()
         active_crawlers = Crawler.query.filter_by(is_active=True).count()
@@ -1222,7 +1223,7 @@ def list_crawlers():
         return jsonify({"error": "Session expired"}), 401
 
     try:
-        from models import CrawlerRun
+        from core.models import CrawlerRun
 
         crawlers = Crawler.query.all()
 
@@ -1320,60 +1321,53 @@ def start_crawler(crawler_id):
         return jsonify({"error": "Crawler is disabled"}), 403
 
     try:
-        # Get scraper manager and start
-        scraper_manager = get_scraper_manager(crawler_id, admin_id)
+        # Enqueue job to Redis/RQ instead of using threads
+        from redis import Redis
+        from rq import Queue
+        from jobs.tasks import run_crawler_job
+        
+        # Connect to Redis
+        redis_conn = Redis.from_url(current_app.config["REDIS_URL"])
 
-        # Capture the Flask app instance for the thread
-        flask_app = current_app._get_current_object()
+        # Check if another crawler is already queued or running
+        # This is an additional safety check beyond the database lock in tasks.py
+        queue = Queue("crawlers", connection=redis_conn)
 
-        # Run in background thread
-        def run_scraper():
-            """Execute real scraper in background thread"""
-            with flask_app.app_context():
-                try:
-                    flask_app.logger.info(
-                        f"🎬 Starting scraper thread for crawler_id: {crawler_id}"
-                    )
+        # Check if any crawler job is currently running or queued
+        running_jobs = queue.started_job_registry.get_job_ids()
+        queued_jobs = queue.get_job_ids()
 
-                    # Create new event loop for this thread
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
+        if running_jobs or queued_jobs:
+            return jsonify({
+                "error": "Another crawler is already running or queued. Only one crawler can run at a time."
+            }), 409
+        
+        # Enqueue the crawler job
+        job = queue.enqueue(
+            run_crawler_job,
+            crawler_id,
+            admin_id,
+            "manual",
+            job_timeout=7200  # 2 hours max for job execution
+        )
+        
+        # NOTE: Don't set is_running=True here - let the job set it
+        # This prevents race condition where job checks and finds it already True
+        crawler.started_by = admin_id
+        crawler.last_started_at = datetime.utcnow()
+        db.session.commit()
 
-                    # Execute the actual scraper
-                    result = loop.run_until_complete(
-                        scraper_manager.start_scraper("manual")
-                    )
-
-                    loop.close()
-
-                    if result.get("success"):
-                        flask_app.logger.info(f"✅ Scraper completed: {crawler.name}")
-                    else:
-                        flask_app.logger.error(
-                            f"❌ Scraper failed: {result.get('error')}"
-                        )
-
-                except Exception as e:
-                    flask_app.logger.error(
-                        f"❌ Scraper thread error: {e}", exc_info=True
-                    )
-                finally:
-                    # Cleanup scraper manager
-                    cleanup_scraper_manager(crawler_id)
-
-        import threading
-
-        thread = threading.Thread(target=run_scraper, daemon=True)
-        thread.start()
-
-        current_app.logger.info(f"🚀 Crawler started: {crawler.name}")
+        current_app.logger.info(
+            f"🚀 Crawler job enqueued: {crawler.name} (Job ID: {job.id})"
+        )
 
         return jsonify(
             {
-                "message": "Crawler started successfully",
+                "message": "Crawler job enqueued successfully",
                 "crawler_id": crawler_id,
+                "job_id": job.id,
                 "run_type": "manual",
-                "status": "running",
+                "status": "queued",
             }
         ), 200
 
@@ -1877,3 +1871,163 @@ def clear_database():
     return jsonify(
         {"error": "Database clear operation not implemented for safety"}
     ), 501
+
+
+# ========================================================================
+# PRODUCTION-GRADE MONITORING ENDPOINTS
+# ========================================================================
+
+@admin_bp.route("/workers/health", methods=["GET", "OPTIONS"])
+@jwt_required()
+def get_workers_health():
+    """
+    Get worker health status and metrics
+    Production-grade monitoring endpoint
+    """
+    if request.method == "OPTIONS":
+        return "", 204
+    
+    admin_id = get_jwt_identity()
+    admin = verify_admin_session(admin_id)
+    
+    if not admin:
+        return jsonify({"error": "Session expired"}), 401
+    
+    try:
+        health = get_worker_health()
+        return jsonify(health), 200
+    except Exception as e:
+        current_app.logger.error(f"Error getting worker health: {str(e)}")
+        return jsonify({
+            "healthy": False,
+            "error": str(e)
+        }), 500
+
+
+@admin_bp.route("/crawlers/<crawler_id>/job/status", methods=["GET", "OPTIONS"])
+@jwt_required()
+def get_crawler_job_status_endpoint(crawler_id):
+    """
+    Get detailed status of crawler job
+    Includes: progress, heartbeat, errors, retry info
+    """
+    if request.method == "OPTIONS":
+        return "", 204
+    
+    admin_id = get_jwt_identity()
+    admin = verify_admin_session(admin_id)
+    
+    if not admin:
+        return jsonify({"error": "Session expired"}), 401
+    
+    try:
+        status = get_crawler_job_status(crawler_id)
+        
+        if not status:
+            return jsonify({
+                "crawler_id": crawler_id,
+                "status": "idle",
+                "message": "No job running or completed recently"
+            }), 200
+        
+        return jsonify(status), 200
+    except Exception as e:
+        current_app.logger.error(f"Error getting crawler job status: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@admin_bp.route("/system/monitoring", methods=["GET", "OPTIONS"])
+@jwt_required()
+def get_system_monitoring():
+    """
+    Comprehensive system monitoring endpoint
+    Returns: worker health, queue stats, crawler statuses, system metrics
+    """
+    if request.method == "OPTIONS":
+        return "", 204
+    
+    admin_id = get_jwt_identity()
+    admin = verify_admin_session(admin_id)
+    
+    if not admin:
+        return jsonify({"error": "Session expired"}), 401
+    
+    try:
+        # Worker health
+        worker_health = get_worker_health()
+        
+        # Active crawlers
+        running_crawlers = Crawler.query.filter_by(is_running=True).all()
+        crawler_statuses = []
+        
+        for crawler in running_crawlers:
+            job_status = get_crawler_job_status(str(crawler.id))
+            crawler_statuses.append({
+                "crawler_id": str(crawler.id),
+                "crawler_name": crawler.name,
+                "status": job_status if job_status else {"status": "unknown"}
+            })
+        
+        # Database stats
+        from core.models import SoleImage, UploadedImage, MatchResult
+        db_stats = {
+            "sole_images": SoleImage.query.count(),
+            "uploaded_images": UploadedImage.query.count(),
+            "match_results": MatchResult.query.count(),
+            "total_crawlers": Crawler.query.count(),
+            "active_crawlers": Crawler.query.filter_by(is_active=True).count(),
+        }
+        
+        return jsonify({
+            "timestamp": datetime.utcnow().isoformat(),
+            "worker_health": worker_health,
+            "running_crawlers": crawler_statuses,
+            "database_stats": db_stats,
+        }), 200
+        
+    except Exception as e:
+        current_app.logger.error(f"Error getting system monitoring: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@admin_bp.route("/jobs/dead-letter-queue", methods=["GET", "OPTIONS"])
+@jwt_required()
+def get_dead_letter_queue():
+    """
+    Get jobs from dead letter queue (permanently failed jobs)
+    """
+    if request.method == "OPTIONS":
+        return "", 204
+    
+    admin_id = get_jwt_identity()
+    admin = verify_admin_session(admin_id)
+    
+    if not admin:
+        return jsonify({"error": "Session expired"}), 401
+    
+    try:
+        from redis import Redis
+        redis_conn = Redis.from_url(current_app.config.get("REDIS_URL", "redis://localhost:6379/0"))
+        
+        # Get dead letter queue entries
+        entries = redis_conn.lrange("crawler:dead_letter_queue", 0, -1)
+        
+        dead_jobs = []
+        for entry in entries:
+            entry_str = entry.decode() if isinstance(entry, bytes) else entry
+            parts = entry_str.split(":")
+            if len(parts) >= 3:
+                dead_jobs.append({
+                    "crawler_id": parts[0],
+                    "job_id": parts[1],
+                    "failed_at": parts[2]
+                })
+        
+        return jsonify({
+            "total": len(dead_jobs),
+            "jobs": dead_jobs
+        }), 200
+        
+    except Exception as e:
+        current_app.logger.error(f"Error getting dead letter queue: {str(e)}")
+        return jsonify({"error": str(e)}), 500
