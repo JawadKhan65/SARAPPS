@@ -433,11 +433,9 @@ class JohnLobbScraper:
                         logger.info(f"✅ Scraped Product #{idx}:")
                         logger.info(f"   Brand: {details.get('brand', 'N/A')}")
                         logger.info(f"   Product Name: {details.get('name', 'N/A')}")
+                        logger.info(f"   Product URL: {details.get('url', 'N/A')}")
                         logger.info(
-                            f"   Product URL: {details.get('source_url', 'N/A')}"
-                        )
-                        logger.info(
-                            f"   Sole Image URL: {details.get('image_url', 'N/A')[:80] if details.get('image_url') else 'N/A'}..."
+                            f"   Sole Image URL: {details.get('last_image_url', 'N/A')[:80] if details.get('last_image_url') else 'N/A'}..."
                         )
 
                         self.products.append(details)
