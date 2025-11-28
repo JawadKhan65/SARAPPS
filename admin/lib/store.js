@@ -29,7 +29,7 @@ export const useAdminStore = create(
                 try {
                     // Send credentials directly to backend
                     console.log('📡 Sending credentials to backend...');
-                    const response = await fetch('http://localhost:5000/api/auth/admin/login', {
+                    const response = await fetch('/api/auth/admin/login', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ email, password }),
@@ -98,7 +98,7 @@ export const useAdminStore = create(
                     }
 
                     console.log('📤 Sending MFA code to backend...');
-                    const response = await fetch('http://localhost:5000/api/auth/admin/mfa-verify', {
+                    const response = await fetch('/api/auth/admin/mfa-verify', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ email, mfa_code: verificationCode }),
@@ -166,7 +166,7 @@ export const useAdminStore = create(
                         return;
                     }
 
-                    const response = await fetch('http://localhost:5000/api/admin/profile', {
+                    const response = await fetch('/api/admin/profile', {
                         headers: { Authorization: `Bearer ${token}` },
                     });
 

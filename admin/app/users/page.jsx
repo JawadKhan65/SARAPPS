@@ -272,7 +272,7 @@ export default function UsersPage() {
                                         <td className="px-6 py-4">
                                             {user.group && user.group.profile_image_url ? (
                                                 <img
-                                                    src={`http://localhost:5000${user.group.profile_image_url}`}
+                                                    src={`${user.group.profile_image_url}`}
                                                     alt={user.username}
                                                     className="h-10 w-10 rounded-full object-cover"
                                                 />

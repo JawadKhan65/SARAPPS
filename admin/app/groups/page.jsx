@@ -369,7 +369,7 @@ export default function GroupsPage() {
                                 <div className="relative h-48 bg-gradient-to-br from-blue-100 to-indigo-100 overflow-hidden">
                                     {group.profile_image_url ? (
                                         <img
-                                            src={`http://localhost:5000${group.profile_image_url}`}
+                                            src={`${group.profile_image_url}`}
                                             alt={group.name}
                                             className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300"
                                         />

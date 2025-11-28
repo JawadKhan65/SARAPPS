@@ -20,7 +20,7 @@ export default function Header() {
             setProfileImageUrl(user.profile_image_url);
         } else if (user?.group_id) {
             // Fallback: build URL from group_id if profile_image_url not provided
-            const imageUrl = `http://localhost:5000/api/admin/groups/${user.group_id}/image`;
+            const imageUrl = `/api/admin/groups/${user.group_id}/image`;
             setProfileImageUrl(imageUrl);
         } else {
             setProfileImageUrl(null);

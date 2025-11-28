@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { useAdminStore } from '@/lib/store';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
 
 // Create axios instance
 const apiClient = axios.create({
@@ -75,7 +75,7 @@ export const adminAPI = {
     updateCrawlerConfig: (id, config) => apiClient.put(`/admin/crawlers/${id}/config`, config),
     getCrawlerStats: (id) => apiClient.get(`/admin/crawlers/${id}/stats`),
     clearCrawlerCache: (id) => apiClient.post(`/admin/crawlers/${id}/cache/clear`),
-    
+
     // Production monitoring endpoints
     getCrawlerJobStatus: (id) => apiClient.get(`/admin/crawlers/${id}/job/status`),
     getWorkersHealth: () => apiClient.get('/admin/workers/health'),

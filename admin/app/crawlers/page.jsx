@@ -36,14 +36,14 @@ export default function CrawlersPage() {
         loadCrawlers();
         loadStats();
         loadWorkerHealth();
-        
+
         const interval = setInterval(() => {
             loadCrawlers();
             loadStats();
             loadWorkerHealth();
             loadJobStatuses();
         }, 3000); // Refresh every 3s
-        
+
         return () => clearInterval(interval);
     }, [isAuthenticated]);
 
@@ -105,15 +105,15 @@ export default function CrawlersPage() {
     const handleStartCrawler = async (crawlerId) => {
         // Add to starting set to show loading state
         setStartingCrawlers(prev => new Set(prev).add(crawlerId));
-        
+
         try {
             await adminAPI.startCrawler(crawlerId);
-            
+
             // Start polling job status immediately
             setTimeout(() => {
                 loadJobStatuses();
             }, 1000);
-            
+
             await loadCrawlers();
         } catch (err) {
             setError('Failed to start crawler: ' + (err.response?.data?.error || err.message));
@@ -200,16 +200,14 @@ export default function CrawlersPage() {
                             <h1 className="text-4xl font-bold text-gray-900 flex items-center gap-3">
                                 Data Crawlers
                                 {workerHealth && (
-                                    <span className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-sm font-medium ${
-                                        workerHealth.healthy && workerHealth.workers > 0
+                                    <span className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-sm font-medium ${workerHealth.healthy && workerHealth.workers > 0
                                             ? 'text-green-700 bg-green-50 border border-green-200'
                                             : 'text-red-700 bg-red-50 border border-red-200'
-                                    }`}>
-                                        <span className={`w-2 h-2 rounded-full ${
-                                            workerHealth.healthy && workerHealth.workers > 0
+                                        }`}>
+                                        <span className={`w-2 h-2 rounded-full ${workerHealth.healthy && workerHealth.workers > 0
                                                 ? 'bg-green-500 animate-pulse'
                                                 : 'bg-red-500'
-                                        }`}></span>
+                                            }`}></span>
                                         {workerHealth.workers || 0} Worker{workerHealth.workers !== 1 ? 's' : ''}
                                     </span>
                                 )}
@@ -447,7 +445,7 @@ function CrawlerCard({ crawler, jobStatus, isStarting, expanded, onToggleExpand,
     const heartbeat = jobStatus?.heartbeat;
     const isStalled = jobStatus?.heartbeat_stale === true;
     const errorDetails = jobStatus?.error_details;
-    
+
     return (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden hover:shadow-md transition-all">
             {/* Main Card Content */}
@@ -549,52 +547,116 @@ function CrawlerCard({ crawler, jobStatus, isStarting, expanded, onToggleExpand,
                     </div>
                 </div>
 
-                {/* Real-time Progress (from job status) */}
+                {/* Real-time Interactive Progress */}
                 {crawler.is_running && progress && (
-                    <div className="ml-8 mt-4">
-                        <div className="flex items-center justify-between text-sm mb-2">
-                            <div className="flex items-center gap-2">
-                                <span className="text-gray-600 font-medium">Progress</span>
+                    <div className="ml-8 mt-4 bg-gradient-to-br from-blue-50 to-green-50 rounded-lg p-4 border border-blue-100">
+                        <div className="flex items-center justify-between text-sm mb-3">
+                            <div className="flex items-center gap-3">
+                                <span className="text-gray-700 font-semibold">Progress</span>
                                 {heartbeat && (
-                                    <span className="flex items-center gap-1 text-xs text-green-600">
+                                    <span className="flex items-center gap-1.5 text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full font-medium">
                                         <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
                                         Live
                                     </span>
                                 )}
                             </div>
-                            <span className="text-gray-900 font-semibold">
-                                {progress.current || 0} / {progress.total || 0} items • {progress.percentage || 0}%
-                            </span>
+                            <div className="flex items-center gap-4">
+                                <span className="text-gray-900 font-bold text-base">
+                                    {progress.current || 0} / {progress.total || 0} items
+                                </span>
+                                <span className="text-blue-600 font-bold text-lg">
+                                    {progress.percentage || 0}%
+                                </span>
+                            </div>
                         </div>
-                        <div className="w-full bg-gray-200 rounded-full h-2.5 overflow-hidden mb-2">
-                            <div
-                                className="bg-gradient-to-r from-blue-500 to-green-500 h-2.5 rounded-full transition-all duration-500"
-                                style={{ width: `${Math.min(progress.percentage || 0, 100)}%` }}
-                            />
+
+                        {/* Interactive Progress Bar with Click to Pause */}
+                        <div
+                            className="relative group cursor-pointer"
+                            onClick={() => onToggle()}
+                            title="Click to pause/resume"
+                        >
+                            <div className="w-full bg-gray-300 rounded-full h-4 overflow-hidden shadow-inner">
+                                <div
+                                    className="bg-gradient-to-r from-blue-500 via-blue-600 to-green-500 h-4 rounded-full transition-all duration-500 relative overflow-hidden"
+                                    style={{ width: `${Math.min(progress.percentage || 0, 100)}%` }}
+                                >
+                                    {/* Animated shine effect */}
+                                    <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white to-transparent opacity-30 animate-shimmer"></div>
+                                </div>
+                            </div>
+                            {/* Hover overlay */}
+                            <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/5 rounded-full">
+                                {crawler.is_running ? (
+                                    <Pause className="w-5 h-5 text-gray-700" />
+                                ) : (
+                                    <Play className="w-5 h-5 text-gray-700" />
+                                )}
+                            </div>
                         </div>
+
+                        {/* Stats Row */}
+                        <div className="grid grid-cols-3 gap-4 mt-3 text-xs">
+                            {progress.total > 0 && progress.current > 0 && (
+                                <div className="flex flex-col">
+                                    <span className="text-gray-500 uppercase tracking-wide">Items/sec</span>
+                                    <span className="text-gray-900 font-semibold text-sm mt-0.5">
+                                        {((progress.current / ((Date.now() - new Date(crawler.last_run_at).getTime()) / 1000)) || 0).toFixed(2)}
+                                    </span>
+                                </div>
+                            )}
+                            {progress.total > progress.current && progress.current > 0 && (
+                                <div className="flex flex-col">
+                                    <span className="text-gray-500 uppercase tracking-wide">Est. Remaining</span>
+                                    <span className="text-gray-900 font-semibold text-sm mt-0.5">
+                                        {(() => {
+                                            const elapsed = (Date.now() - new Date(crawler.last_run_at).getTime()) / 1000;
+                                            const rate = progress.current / elapsed;
+                                            const remaining = (progress.total - progress.current) / rate;
+                                            const mins = Math.floor(remaining / 60);
+                                            const secs = Math.floor(remaining % 60);
+                                            return `${mins}m ${secs}s`;
+                                        })()}
+                                    </span>
+                                </div>
+                            )}
+                            {crawler.uniqueness_percentage != null && (
+                                <div className="flex flex-col">
+                                    <span className="text-gray-500 uppercase tracking-wide">Uniqueness</span>
+                                    <span className={`font-semibold text-sm mt-0.5 ${crawler.uniqueness_percentage > 70 ? 'text-green-600' :
+                                            crawler.uniqueness_percentage > 40 ? 'text-yellow-600' :
+                                                'text-red-600'
+                                        }`}>
+                                        {crawler.uniqueness_percentage.toFixed(1)}%
+                                    </span>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Current Activity Message */}
                         {progress.message && (
-                            <p className="text-xs text-gray-600 flex items-center gap-1.5">
-                                <Loader2 className="w-3 h-3 animate-spin" />
-                                {progress.message}
-                            </p>
+                            <div className="mt-3 pt-3 border-t border-blue-200">
+                                <p className="text-xs text-gray-700 flex items-center gap-2 bg-white/60 rounded px-2 py-1.5">
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600" />
+                                    <span className="font-medium">{progress.message}</span>
+                                </p>
+                            </div>
                         )}
                     </div>
                 )}
-                
-                {/* Fallback progress bar (database values) */}
+
+                {/* Fallback progress indicator (database values) */}
                 {crawler.is_running && !progress && (
-                    <div className="ml-8 mt-4">
+                    <div className="ml-8 mt-4 bg-gray-50 rounded-lg p-3 border border-gray-200">
                         <div className="flex items-center justify-between text-sm mb-2">
-                            <span className="text-gray-600 font-medium">Progress</span>
+                            <span className="text-gray-600 font-medium">Running</span>
                             <span className="text-gray-900 font-semibold">
                                 {crawler.current_run_items || 0} items • Batch {crawler.current_batch || 0}
                             </span>
                         </div>
-                        <div className="w-full bg-gray-200 rounded-full h-2.5 overflow-hidden">
-                            <div
-                                className="bg-gradient-to-r from-blue-500 to-green-500 h-2.5 rounded-full transition-all duration-500 animate-pulse"
-                                style={{ width: `${Math.min(crawler.progress_percentage || 0, 100)}%` }}
-                            />
+                        <div className="flex items-center gap-2 text-xs text-gray-500">
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                            <span>Waiting for real-time progress data...</span>
                         </div>
                     </div>
                 )}
