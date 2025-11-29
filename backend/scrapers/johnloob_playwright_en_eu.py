@@ -354,7 +354,7 @@ class JohnLobbScraper:
             logger.info("Cancellation support enabled")
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=False)
+            browser = await p.chromium.launch(headless=True)
             context = await browser.new_context(user_agent=USER_AGENT)
             page = await context.new_page()
             page.set_default_timeout(DEFAULT_TIMEOUT)

@@ -170,7 +170,7 @@ class Military1stScraper(BatchProcessingMixin):
                             href = href.replace("httpps://", "https://")
                             href = href.replace("htttps://", "https://")
                             href = href.replace("httttp://", "http://")
-                            
+
                             # Normalize to absolute URL
                             if href.startswith("/"):
                                 href = "https://www.military1st.eu" + href
@@ -405,7 +405,7 @@ class Military1stScraper(BatchProcessingMixin):
             logger.info("Using real-time batch processing")
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=False)
+            browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
 
             # Set viewport to standard size
@@ -545,7 +545,7 @@ async def main():
     scraper = Military1stScraper()
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False)
+        browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
 
         # Set viewport to standard size

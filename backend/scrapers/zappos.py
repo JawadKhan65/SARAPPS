@@ -46,7 +46,7 @@ class ZapposScraper(BatchProcessingMixin):
             logger.info("Cancellation support enabled")
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=False)
+            browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
             try:
                 await self.scrape_products(
@@ -91,7 +91,11 @@ class ZapposScraper(BatchProcessingMixin):
             next_page_url = self.base_url
             global_idx = 1
 
-            while next_page_url and (self.max_pages is None or current_page <= self.max_pages) and not should_stop:
+            while (
+                next_page_url
+                and (self.max_pages is None or current_page <= self.max_pages)
+                and not should_stop
+            ):
                 # Check for cancellation at page boundary
                 if is_cancelled and is_cancelled():
                     logger.warning(

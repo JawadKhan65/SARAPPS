@@ -620,7 +620,7 @@ class AmazonScraper(BatchProcessingMixin):
             logger.info("Using real-time batch processing")
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=False)
+            browser = await p.chromium.launch(headless=True)
             context = await browser.new_context(
                 user_agent=USER_AGENT,
                 locale="en-US",
@@ -815,7 +815,7 @@ class AmazonScraper(BatchProcessingMixin):
 async def main():
     scraper = AmazonScraper()
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False)
+        browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
             user_agent=USER_AGENT,
             locale="en-US",

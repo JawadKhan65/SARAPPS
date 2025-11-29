@@ -424,7 +424,7 @@ class BergfreundeScraper(BatchProcessingMixin):
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(
-                headless=False, args=["--disable-blink-features=AutomationControlled"]
+                headless=True, args=["--disable-blink-features=AutomationControlled"]
             )
             context = await browser.new_context(user_agent=USER_AGENT)
             page = await context.new_page()
