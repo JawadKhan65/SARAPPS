@@ -146,9 +146,15 @@ class SoleImage(db.Model):
     lbp_histogram = db.Column(db.LargeBinary, nullable=True)  # LBP features
 
     # pgvector columns for fast similarity search
-    clip_embedding = db.Column(Vector(512) if Vector else db.LargeBinary, nullable=True)  # CLIP 512-dim vectors
-    edge_embedding = db.Column(Vector(256) if Vector else db.LargeBinary, nullable=True)  # Edge features 256-dim
-    texture_embedding = db.Column(Vector(128) if Vector else db.LargeBinary, nullable=True)  # Texture features 128-dim
+    clip_embedding = db.Column(
+        Vector(512) if Vector else db.LargeBinary, nullable=True
+    )  # CLIP 512-dim vectors
+    edge_embedding = db.Column(
+        Vector(256) if Vector else db.LargeBinary, nullable=True
+    )  # Edge features 256-dim
+    texture_embedding = db.Column(
+        Vector(128) if Vector else db.LargeBinary, nullable=True
+    )  # Texture features 128-dim
 
     # Metadata
     image_width = db.Column(db.Integer)
@@ -279,14 +285,21 @@ class MatchHistory(db.Model):
     total_matches = db.Column(db.Integer, default=0)
     best_score = db.Column(db.Float, nullable=True)  # Highest similarity score
     matching_time_ms = db.Column(db.Integer, nullable=True)
-    
+
     # Timestamps
     matched_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
 
     # Relationships
     user = db.relationship("User", backref=db.backref("match_history", lazy="dynamic"))
-    uploaded_image = db.relationship("UploadedImage", backref=db.backref("match_history", lazy="dynamic"))
-    match_details = db.relationship("MatchDetail", back_populates="match_history", cascade="all, delete-orphan", lazy="dynamic")
+    uploaded_image = db.relationship(
+        "UploadedImage", backref=db.backref("match_history", lazy="dynamic")
+    )
+    match_details = db.relationship(
+        "MatchDetail",
+        back_populates="match_history",
+        cascade="all, delete-orphan",
+        lazy="dynamic",
+    )
 
     def __repr__(self):
         return f"<MatchHistory {self.id} - {self.total_matches} matches>"
@@ -313,13 +326,15 @@ class MatchDetail(db.Model):
     feature_score = db.Column(db.Float, nullable=True)
     edge_score = db.Column(db.Float, nullable=True)
     texture_score = db.Column(db.Float, nullable=True)
-    
+
     # Timestamps
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
 
     # Relationships
     match_history = db.relationship("MatchHistory", back_populates="match_details")
-    sole_image = db.relationship("SoleImage", backref=db.backref("match_details", lazy="dynamic"))
+    sole_image = db.relationship(
+        "SoleImage", backref=db.backref("match_details", lazy="dynamic")
+    )
 
     def __repr__(self):
         return f"<MatchDetail {self.id} - Rank {self.rank} - Score {self.similarity_score:.3f}>"
@@ -500,18 +515,18 @@ class SystemConfig(db.Model):
     id = db.Column(db.Integer, primary_key=True)
 
     # General settings
-    site_name = db.Column(db.String(255), default="Shoe Identifier")
-    site_description = db.Column(
-        db.Text, default="Advanced shoe identification platform"
-    )
+    site_name = db.Column(db.String(255), default="Shoe Type Identification System")
+    site_description = db.Column(db.Text, default="Shoe  Type Identification System")
 
     # SMTP Settings
-    smtp_server = db.Column(db.String(255), nullable=False, default="smtp.gmail.com")
+    smtp_server = db.Column(
+        db.String(255), nullable=False, default="smtp.transip.email"
+    )
     smtp_port = db.Column(db.Integer, default=587)
     smtp_username = db.Column(db.String(255), nullable=True, default="")
     smtp_password = db.Column(db.String(255), nullable=True, default="")
     smtp_sender_email = db.Column(
-        db.String(255), nullable=True, default="noreply@stip.local"
+        db.String(255), nullable=True, default="yourOTP@sarapps.com"
     )
     smtp_security = db.Column(db.String(20), default="STARTTLS")  # STARTTLS, TLS, NONE
 

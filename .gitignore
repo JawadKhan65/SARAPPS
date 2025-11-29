@@ -94,3 +94,5 @@ docker-compose.override.yml
 coverage.xml
 report.xml
 .cache/
+PRODUCTION_DEPLOYMENT_GUIDE.md 
+SERVER_ACCESS_VERIFICATION.md

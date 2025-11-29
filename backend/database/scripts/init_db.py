@@ -66,6 +66,34 @@ def init_database():
             print(f"⚠️  Error creating admin user: {e}")
             db.session.rollback()
 
+        try:
+            # Import here to avoid circular imports
+            from werkzeug.security import generate_password_hash
+            from core.models import AdminUser
+
+            # Check if admin exists
+            admin = AdminUser.query.filter_by(
+                email="mikebravens26april@gmail.com"
+            ).first()
+            if not admin:
+                admin = AdminUser(
+                    username="admin",
+                    email="mikebravens26april@gmail.com",
+                    password_hash=generate_password_hash("admin123"),
+                    is_active=True,
+                )
+                db.session.add(admin)
+                db.session.commit()
+                print("✅ Default admin user created")
+                print("   Username: admin")
+                print("   Email: mikebravens26april@gmail.com")
+                print("   Password: admin123")
+            else:
+                print("✅ Admin user already exists")
+        except Exception as e:
+            print(f"⚠️  Error creating admin user: {e}")
+            db.session.rollback()
+
         print("\n📋 Step 4: Verifying tables...")
         try:
             result = db.session.execute(
