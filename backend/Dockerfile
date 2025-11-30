@@ -20,10 +20,23 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install runtime dependencies
+# Install runtime dependencies including Playwright system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     curl \
+    libnss3 \
+    libnspr4 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libasound2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user first
@@ -48,6 +61,9 @@ RUN mkdir -p logs uploads uploads/originals uploads/processed uploads/sole_image
 
 # Switch to non-root user
 USER appuser
+
+# Install Playwright browsers as appuser
+RUN /home/appuser/.local/bin/playwright install chromium
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
