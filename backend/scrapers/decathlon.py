@@ -417,7 +417,17 @@ class DecathlonScraper(BatchProcessingMixin):
 
         async with async_playwright() as p:
             logger.info("Step 0: Launching browser...")
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(
+                headless=False,
+                args=[
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--disable-software-rasterizer',
+                    '--disable-extensions'
+                ]
+            )
 
             try:
                 page = await browser.new_page()

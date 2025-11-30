@@ -397,7 +397,16 @@ class CanterburyScraper(BatchProcessingMixin):
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(
-                headless=True, args=["--disable-blink-features=AutomationControlled"]
+                headless=False,
+                args=[
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--disable-software-rasterizer',
+                    '--disable-extensions',
+                    '--disable-blink-features=AutomationControlled'
+                ]
             )
             context = await browser.new_context(user_agent=USER_AGENT)
             page = await context.new_page()
