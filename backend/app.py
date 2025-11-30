@@ -43,14 +43,22 @@ def create_app(config_name=None):
     if isinstance(allowed_origins, str):
         allowed_origins = [origin.strip() for origin in allowed_origins.split(",")]
     
+    # Log CORS origins for debugging
+    app.logger.info(f"🌐 CORS allowed origins: {allowed_origins}")
+    
     CORS(
         app,
-        resources={r"/api/*": {"origins": allowed_origins}},
+        resources={
+            r"/api/*": {
+                "origins": allowed_origins,
+                "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                "allow_headers": ["Content-Type", "Authorization", "Accept", "Origin", "X-Requested-With"],
+                "expose_headers": ["Content-Type", "Authorization"],
+                "supports_credentials": True,
+                "max_age": 3600,
+            }
+        },
         supports_credentials=True,
-        allow_headers=["Content-Type", "Authorization", "Accept", "Origin"],
-        expose_headers=["Content-Type", "Authorization"],
-        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        max_age=3600,
     )
 
     # Logging setup

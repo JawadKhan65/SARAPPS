@@ -1,7 +1,9 @@
 import axios from 'axios';
 import { useAdminStore } from '@/lib/store';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
+// For development, point to backend on port 5000
+// For production, use environment variable (will be /api via nginx)
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api';
 
 // Create axios instance
 const apiClient = axios.create({

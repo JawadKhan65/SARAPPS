@@ -1,6 +1,9 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
+// Get API base URL from environment variable or default to localhost:5000 for development
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api';
+
 export const useAdminStore = create(
     persist(
         (set, get) => ({
@@ -29,7 +32,8 @@ export const useAdminStore = create(
                 try {
                     // Send credentials directly to backend
                     console.log('📡 Sending credentials to backend...');
-                    const response = await fetch('/api/auth/admin/login', {
+                    console.log('🌐 API URL:', `${API_BASE_URL}/auth/admin/login`);
+                    const response = await fetch(`${API_BASE_URL}/auth/admin/login`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ email, password }),
@@ -98,7 +102,7 @@ export const useAdminStore = create(
                     }
 
                     console.log('📤 Sending MFA code to backend...');
-                    const response = await fetch('/api/auth/admin/mfa-verify', {
+                    const response = await fetch(`${API_BASE_URL}/auth/admin/mfa-verify`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ email, mfa_code: verificationCode }),
@@ -166,7 +170,7 @@ export const useAdminStore = create(
                         return;
                     }
 
-                    const response = await fetch('/api/admin/profile', {
+                    const response = await fetch(`${API_BASE_URL}/admin/profile`, {
                         headers: { Authorization: `Bearer ${token}` },
                     });
 
