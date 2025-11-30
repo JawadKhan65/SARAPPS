@@ -38,6 +38,9 @@ cryptography
 pyotp
 qrcode
 
+# Firebase
+firebase-admin
+
 # Rate Limiting
 Flask-Limiter
 
