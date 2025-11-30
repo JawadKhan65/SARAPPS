@@ -78,9 +78,13 @@ def create_app(config_name=None):
     app.limiter = limiter
 
     # Create upload directories
-    os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
-    os.makedirs(os.path.join(app.config["UPLOAD_FOLDER"], "originals"), exist_ok=True)
-    os.makedirs(os.path.join(app.config["UPLOAD_FOLDER"], "processed"), exist_ok=True)
+    try:
+        os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+        os.makedirs(os.path.join(app.config["UPLOAD_FOLDER"], "originals"), exist_ok=True)
+        os.makedirs(os.path.join(app.config["UPLOAD_FOLDER"], "processed"), exist_ok=True)
+    except PermissionError as e:
+        app.logger.warning(f"Could not create upload directories: {e}")
+        app.logger.warning("Upload directories will be created by Docker volume mounts")
 
     # Database context
     with app.app_context():
@@ -150,6 +154,10 @@ def create_app(config_name=None):
         }
 
     return app
+
+
+# Create application instance for Gunicorn
+app = create_app()
 
 
 if __name__ == "__main__":
