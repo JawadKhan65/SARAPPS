@@ -116,8 +116,9 @@ services:
     environment:
       NODE_ENV: production
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+      PORT: 3001
     ports:
-      - "3001:3000"
+      - "3001:3001"
     networks:
       - stip_network
     restart: unless-stopped
