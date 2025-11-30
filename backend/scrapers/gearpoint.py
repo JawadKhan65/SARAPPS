@@ -532,7 +532,11 @@ class GearPointScraper(BatchProcessingMixin):
                     '--disable-dev-shm-usage',
                     '--disable-gpu',
                     '--disable-software-rasterizer',
-                    '--disable-extensions'
+                    '--disable-extensions',
+                    '--disable-features=VizDisplayCompositor',
+                    '--disable-accelerated-2d-canvas',
+                    '--disable-features=IsolateOrigins,site-per-process',
+                    '--single-process'
                 ]
             )
             context = await browser.new_context(user_agent=USER_AGENT)

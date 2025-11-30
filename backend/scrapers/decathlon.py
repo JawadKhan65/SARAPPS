@@ -418,7 +418,7 @@ class DecathlonScraper(BatchProcessingMixin):
         async with async_playwright() as p:
             logger.info("Step 0: Launching browser...")
             browser = await p.chromium.launch(
-                headless=False,
+                headless=True,
                 args=[
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
