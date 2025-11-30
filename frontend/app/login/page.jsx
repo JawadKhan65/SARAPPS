@@ -9,6 +9,9 @@ import { useToast } from '@/components/ui/Toast';
 import Button from '@/components/ui/Button';
 import Input from '@/components/ui/Input';
 
+// Force dynamic rendering for this page (no static pre-rendering)
+export const dynamic = 'force-dynamic';
+
 export default function LoginPage() {
     const router = useRouter();
     const searchParams = useSearchParams();
