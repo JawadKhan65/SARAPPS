@@ -527,17 +527,13 @@ class GearPointScraper(BatchProcessingMixin):
             browser = await p.chromium.launch(
                 headless=True,
                 args=[
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-gpu',
-                    '--disable-software-rasterizer',
-                    '--disable-extensions',
-                    '--disable-features=VizDisplayCompositor',
-                    '--disable-accelerated-2d-canvas',
-                    '--disable-features=IsolateOrigins,site-per-process',
-                    '--single-process'
-                ]
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--disable-software-rasterizer',
+                '--disable-extensions'
+            ]
             )
             context = await browser.new_context(user_agent=USER_AGENT)
             page = await context.new_page()
