@@ -43,7 +43,10 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 PRODUCTS_CONTAINER_SELECTOR = "div.products"
 PRODUCT_ITEM_SELECTOR = "div.product"
 PAGINATION_NAV_SELECTOR = "nav.pagination-a"
-PRODUCT_TITLE_SELECTOR = "h1.page-title span.base"
+PRODUCT_TITLE_SELECTORS = [
+    "header.title h1",  # New layout (Dec 2025)
+    "h1.page-title span.base",  # Legacy layout fallback
+]
 FEATURED_CONTAINER_SELECTOR = "div.featured"
 PRODUCT_IMG_NAV_SELECTOR = "div.product-img-nav"
 OWL_ITEM_SELECTOR = "div.owl-item"
@@ -227,36 +230,47 @@ class GearPointScraper(BatchProcessingMixin):
                         )
                         raise
 
-            # Wait for main content to load
-            try:
-                await page.wait_for_selector(PRODUCT_TITLE_SELECTOR, timeout=15000)
-                logger.debug("  ✓ Product title loaded")
-            except Exception as e:
-                logger.error(f"Product title selector not found: {e}")
+            # Wait for main content (title) to load, trying modern and legacy selectors
+            title_selector = None
+            title_error = None
+            for selector in PRODUCT_TITLE_SELECTORS:
+                try:
+                    await page.wait_for_selector(selector, timeout=15000)
+                    title_selector = selector
+                    logger.debug(f"  ✓ Product title loaded using selector '{selector}'")
+                    break
+                except Exception as e:
+                    title_error = e
+                    logger.debug(f"  Selector '{selector}' not found yet: {e}")
+
+            if not title_selector:
+                logger.error(
+                    f"Product title selector not found using selectors {PRODUCT_TITLE_SELECTORS}: {title_error}"
+                )
                 # Try to capture page state for debugging
                 try:
                     page_title = await page.title()
                     logger.error(f"  Page title: {page_title}")
-                    # Check if we got redirected or blocked
                     current_url = page.url
                     if current_url != url:
                         logger.error(f"  Redirected from {url} to {current_url}")
                 except Exception:
                     pass
-                raise
+                raise title_error if title_error else RuntimeError("Title selector missing")
 
             await asyncio.sleep(2)  # Give extra time for images to load
 
             # Extract product name
             product_name = "Unknown"
-            try:
-                name_elem = page.locator(PRODUCT_TITLE_SELECTOR).first
-                name_text = await name_elem.text_content(timeout=5000)
-                if name_text:
-                    product_name = name_text.strip()
-                    logger.debug(f"  Product name: {product_name}")
-            except Exception as e:
-                logger.warning(f"Failed to extract product name: {e}")
+            if title_selector:
+                try:
+                    name_elem = page.locator(title_selector).first
+                    name_text = await name_elem.text_content(timeout=5000)
+                    if name_text:
+                        product_name = name_text.strip()
+                        logger.debug(f"  Product name: {product_name}")
+                except Exception as e:
+                    logger.warning(f"Failed to extract product name: {e}")
 
             # Extract all product images
             image_urls = []
