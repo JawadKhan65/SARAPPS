@@ -27,6 +27,7 @@ import sys
 
 # Add backend to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from .chromium_config import get_chromium_launch_config
 from scrapers.base_scraper_mixin import BatchProcessingMixin
 
 logging.basicConfig(
