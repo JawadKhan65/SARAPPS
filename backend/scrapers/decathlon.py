@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 BASE_URL = "https://www.decathlon.com/collections/footwear"
-OUTPUT_DIR = Path("../../data")
+OUTPUT_DIR = Path("data/decathlon")
 OUTPUT_FILE = OUTPUT_DIR / "decathlon_products.json"
 NAVIGATION_TIMEOUT = 60000  # Increased to 60s for slow networks
 SCROLL_PAUSE_TIME = 0.5
