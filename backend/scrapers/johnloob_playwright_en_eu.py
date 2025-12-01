@@ -282,9 +282,9 @@ class JohnLobbScraper:
 
             return {
                 "brand": "John Lobb",
-                "name": shoe_name,
-                "url": url,
-                "last_image_url": last_image_url,
+                "product_name": shoe_name,
+                "source_url": url,
+                "image_url": last_image_url,
                 "scraped_at": datetime.now(timezone.utc).isoformat(),
             }
 
@@ -314,18 +314,18 @@ class JohnLobbScraper:
         for product in batch:
             # Download image to memory if available
             image_bytes = None
-            if product.get("last_image_url"):
-                image_bytes = self._download_image_to_memory(product["last_image_url"])
+            if product.get("image_url"):
+                image_bytes = self._download_image_to_memory(product["image_url"])
 
             if image_bytes:
                 # Convert to format expected by scraper_service
                 processed_product = {
-                    "url": product["url"],
+                    "url": product["source_url"],
                     "brand": product["brand"],
-                    "product_name": product["name"],
+                    "product_name": product["product_name"],
                     "product_type": "shoe",
                     "image_bytes": image_bytes,
-                    "image_url": product["last_image_url"],
+                    "image_url": product["image_url"],
                 }
                 processed_batch.append(processed_product)
             else:
@@ -431,7 +431,9 @@ class JohnLobbScraper:
                         # Log scraped product details
                         logger.info(f"✅ Scraped Product #{idx}:")
                         logger.info(f"   Brand: {details.get('brand', 'N/A')}")
-                        logger.info(f"   Product Name: {details.get('name', 'N/A')}")
+                        logger.info(
+                            f"   Product Name: {details.get('product_name', 'N/A')}"
+                        )
                         logger.info(
                             f"   Product URL: {details.get('source_url', 'N/A')}"
                         )
@@ -539,10 +541,10 @@ class JohnLobbScraper:
                 else "N/A"
             ),
             "products_with_image": sum(
-                1 for p in self.products if p.get("last_image_url")
+                1 for p in self.products if p.get("image_url")
             ),
             "image_rate": (
-                f"{100 * sum(1 for p in self.products if p.get('last_image_url')) / len(self.products):.1f}%"
+                f"{100 * sum(1 for p in self.products if p.get('image_url')) / len(self.products):.1f}%"
                 if self.products
                 else "N/A"
             ),
@@ -564,16 +566,16 @@ class JohnLobbScraper:
         print("=" * 120)
         print(f"\nTotal Products Scraped: {len(self.products)}")
         print(f"Failed URLs: {len(self.failed_urls)}")
-        image_count = sum(1 for p in self.products if p.get("last_image_url"))
+        image_count = sum(1 for p in self.products if p.get("image_url"))
         print(f"Products with Images: {image_count}/{len(self.products)}")
 
         if self.products:
             print("\nScraped Products:")
             for idx, p in enumerate(self.products, 1):
-                print(f"\n{idx}. {p['brand']} - {p['name']}")
+                print(f"\n{idx}. {p['brand']} - {p['product_name']}")
                 print(f"   URL: {p['url']}")
-                if p.get("last_image_url"):
-                    print(f"   ✓ Image: {p['last_image_url']}")
+                if p.get("image_url"):
+                    print(f"   ✓ Image: {p['image_url']}")
                 else:
                     print("   ✗ Image: Not found")
 
