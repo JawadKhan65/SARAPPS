@@ -148,12 +148,15 @@ class ClarksScraper(BatchProcessingMixin):
                 'button:has-text("Close")',  # Text content
                 'button:has-text("Dismiss")',
                 'button:has-text("X")',
+                '[data-testid="redirectPopup"] button',
+                '[data-testid="redirectPopup"] [aria-label*="close" i]',
             ]
 
             close_buttons_found = 0
 
             for selector in close_selectors:
                 try:
+                    # Attempt to close overlays via selector first
                     buttons = page.locator(selector)
                     count = await buttons.count()
 
@@ -177,6 +180,14 @@ class ClarksScraper(BatchProcessingMixin):
                                 continue
                 except Exception:
                     continue
+
+            # As a fallback, dismiss overlays with Escape key
+            if close_buttons_found == 0:
+                try:
+                    await page.keyboard.press("Escape")
+                    logger.debug("Pressed Escape to dismiss potential overlay")
+                except Exception:
+                    pass
 
             if close_buttons_found > 0:
                 logger.info(f"✓ Closed {close_buttons_found} modal overlay(s)")
@@ -286,7 +297,9 @@ class ClarksScraper(BatchProcessingMixin):
                 logger.warning(f"⚠️ Error checking sole image: {e}")
                 return False, 0.0, {}
 
-    async def load_more_products(self, page: Page) -> int:
+    async def load_more_products(
+        self, page: Page, is_cancelled=None, max_clicks: int = 100
+    ) -> int:
         """
         Click the "Load More" button repeatedly to load all products.
 
@@ -298,13 +311,20 @@ class ClarksScraper(BatchProcessingMixin):
            c. Wait for images to load
            d. Check if button is still visible
         3. Stop when button disappears from UI or max attempts reached
+        Args:
+            page: Playwright page instance
+            is_cancelled: optional callable returning True when scraping should stop
+            max_clicks: safety limit to avoid infinite loops
         """
         try:
             logger.info("Loading all products via Load More button...")
             click_count = 0
-            max_clicks = 100  # Safety limit
 
             while click_count < max_clicks:
+                if is_cancelled and is_cancelled():
+                    logger.warning("🛑 Cancellation detected during load-more stage")
+                    break
+
                 try:
                     # Find the load more button
                     button = page.locator(LOAD_MORE_BUTTON_SELECTOR)
@@ -322,11 +342,12 @@ class ClarksScraper(BatchProcessingMixin):
                     await button.evaluate("el => el.scrollIntoView(true)")
                     logger.debug("✓ Scrolled Load More button into view")
 
-                    # Wait a bit for page to settle
-                    await asyncio.sleep(1)
+                    # Wait a bit for page to settle and close overlays
+                    await asyncio.sleep(0.5)
+                    await self.close_modal_overlays(page)
 
                     # Click the button
-                    await button.click(timeout=5000)
+                    await button.click(timeout=5000, force=True)
                     click_count += 1
                     logger.info(f"✓ Clicked Load More button (#{click_count})")
 
@@ -885,7 +906,7 @@ class ClarksScraper(BatchProcessingMixin):
 
                 # Step 2: Load all products via Load More button
                 logger.info("Step 2: Loading all products via Load More button...")
-                await self.load_more_products(page)
+                await self.load_more_products(page, is_cancelled=is_cancelled)
 
                 # Step 3: Extract product links
                 logger.info("Step 3: Extracting product links...")
