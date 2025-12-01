@@ -9,6 +9,7 @@ from PIL import Image
 from io import BytesIO
 
 from playwright.async_api import async_playwright, Page
+from .chromium_config import get_chromium_launch_config
 from urllib.parse import urlparse, parse_qs, unquote
 
 # Make sure ml_models package is importable (workspace layout: backend/ml_models)
@@ -620,17 +621,7 @@ class AmazonScraper(BatchProcessingMixin):
             logger.info("Using real-time batch processing")
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-gpu',
-                    '--disable-software-rasterizer',
-                    '--disable-extensions'
-                ]
-            )
+            browser = await p.chromium.launch(**get_chromium_launch_config())
             context = await browser.new_context(
                 user_agent=USER_AGENT,
                 locale="en-US",
@@ -825,17 +816,7 @@ class AmazonScraper(BatchProcessingMixin):
 async def main():
     scraper = AmazonScraper()
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--disable-software-rasterizer',
-                '--disable-extensions'
-            ]
-        )
+        browser = await p.chromium.launch(**get_chromium_launch_config())
         context = await browser.new_context(
             user_agent=USER_AGENT,
             locale="en-US",

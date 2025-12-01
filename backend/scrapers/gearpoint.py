@@ -524,17 +524,7 @@ class GearPointScraper(BatchProcessingMixin):
         logger.info("Using in-memory image processing (no temp files)")
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--disable-software-rasterizer',
-                '--disable-extensions'
-            ]
-            )
+            browser = await p.chromium.launch(**get_chromium_launch_config())
             context = await browser.new_context(user_agent=USER_AGENT)
             page = await context.new_page()
             page.set_default_timeout(DEFAULT_TIMEOUT)

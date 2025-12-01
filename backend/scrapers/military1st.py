@@ -14,6 +14,7 @@ from PIL import Image
 from io import BytesIO
 
 from playwright.async_api import async_playwright, Page
+from .chromium_config import get_chromium_launch_config
 
 # Add parent directory to path to import ml_models
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -405,17 +406,7 @@ class Military1stScraper(BatchProcessingMixin):
             logger.info("Using real-time batch processing")
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-gpu',
-                    '--disable-software-rasterizer',
-                    '--disable-extensions'
-                ]
-            )
+            browser = await p.chromium.launch(**get_chromium_launch_config())
             page = await browser.new_page()
 
             # Set viewport to standard size
@@ -555,17 +546,7 @@ async def main():
     scraper = Military1stScraper()
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--disable-software-rasterizer',
-                '--disable-extensions'
-            ]
-        )
+        browser = await p.chromium.launch(**get_chromium_launch_config())
         page = await browser.new_page()
 
         # Set viewport to standard size

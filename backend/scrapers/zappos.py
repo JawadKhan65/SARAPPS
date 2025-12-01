@@ -7,6 +7,7 @@ from typing import List, Optional, Dict
 import requests
 from PIL import Image
 from playwright.async_api import Browser, Page, async_playwright
+from .chromium_config import get_chromium_launch_config
 
 # Setup imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -46,17 +47,7 @@ class ZapposScraper(BatchProcessingMixin):
             logger.info("Cancellation support enabled")
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-gpu',
-                    '--disable-software-rasterizer',
-                    '--disable-extensions'
-                ]
-            )
+            browser = await p.chromium.launch(**get_chromium_launch_config())
             page = await browser.new_page()
             try:
                 await self.scrape_products(
