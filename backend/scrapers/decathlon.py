@@ -15,6 +15,7 @@ from playwright.async_api import async_playwright, Page
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from ml_models.clip_model import SoleDetectorCLIP
+from .chromium_config import get_chromium_launch_config
 from scrapers.base_scraper_mixin import BatchProcessingMixin
 
 # Configure logging
