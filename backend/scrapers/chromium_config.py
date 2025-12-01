@@ -18,9 +18,8 @@ DOCKER_CHROMIUM_ARGS = [
     
     # Features & Extensions
     '--disable-extensions',                  # Disable all extensions
-    '--disable-features=VizDisplayCompositor',  # Disable compositor
+    '--disable-features=VizDisplayCompositor,IsolateOrigins,site-per-process',  # Disable compositor & site isolation
     '--disable-accelerated-2d-canvas',       # Disable 2D canvas acceleration
-    '--disable-features=IsolateOrigins,site-per-process',  # Disable site isolation
     
     # Automation & Detection
     '--disable-blink-features=AutomationControlled',  # Hide automation
