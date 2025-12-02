@@ -15,11 +15,12 @@ import json
 import re
 from pathlib import Path
 from io import BytesIO
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from PIL import Image
 import requests
 from playwright.async_api import async_playwright, Page
-from .chromium_config import get_chromium_launch_config
+
+# get_chromium_launch_config no longer used with custom launch args
 import logging
 import sys
 
@@ -36,11 +37,296 @@ DEFAULT_TIMEOUT = 60000  # 60 seconds
 NAVIGATION_TIMEOUT = 90000  # 90 seconds for page navigation
 MAX_RETRIES = 3
 RETRY_DELAY = 3  # seconds between retries
+MAIN_CONTENT_SELECTOR = "#main-content"
+CONSENT_BUTTON_SELECTOR = '[data-testid="uc-accept-all-button"]'
+COOKIE_IFRAME_PREFIX = "sp_message_iframe"
+COOKIE_BUTTON_TEXTS = ["OK", "Akkoord", "Alles toestaan", "Alle cookies accepteren"]
+STORAGE_STATE_PATH = Path(__file__).parent / ".storage" / "zalando_storage.json"
+
+# Enhanced stealth initialization script
+STEALTH_INIT_SCRIPT = """
+// Remove webdriver property
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+// Add chrome object with more realistic properties
+Object.defineProperty(window, 'chrome', { 
+    value: { 
+        runtime: {},
+        loadTimes: function() {},
+        csi: function() {},
+        app: {}
+    } 
+});
+
+// Override plugins to appear more realistic
+Object.defineProperty(navigator, 'plugins', { 
+    get: () => [
+        {
+            0: {type: "application/x-google-chrome-pdf", suffixes: "pdf", description: "Portable Document Format"},
+            description: "Portable Document Format",
+            filename: "internal-pdf-viewer",
+            length: 1,
+            name: "Chrome PDF Plugin"
+        },
+        {
+            0: {type: "application/pdf", suffixes: "pdf", description: "Portable Document Format"},
+            description: "Portable Document Format", 
+            filename: "mhjfbmdgcfjbbpaeojofohoefgiehjai",
+            length: 1,
+            name: "Chrome PDF Viewer"
+        },
+        {
+            0: {type: "application/x-nacl", suffixes: "", description: "Native Client Executable"},
+            1: {type: "application/x-pnacl", suffixes: "", description: "Portable Native Client Executable"},
+            description: "",
+            filename: "internal-nacl-plugin",
+            length: 2,
+            name: "Native Client"
+        }
+    ]
+});
+
+// Languages
+Object.defineProperty(navigator, 'languages', { get: () => ['nl-NL', 'nl', 'en-US', 'en'] });
+
+// Platform
+Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+
+// Hardware concurrency
+Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+
+// Device memory
+Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+
+// Permissions
+const originalQuery = window.navigator.permissions.query;
+window.navigator.permissions.query = (parameters) =>
+  parameters.name === 'notifications'
+    ? Promise.resolve({ state: Notification.permission })
+    : originalQuery(parameters);
+
+// Override userAgent getter
+Object.defineProperty(navigator, 'userAgent', {
+    get: () => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.86 Safari/537.36'
+});
+
+// Screen properties for more realistic headless
+if (window.outerWidth === 0) {
+    Object.defineProperty(window, 'outerWidth', { get: () => 1280 });
+    Object.defineProperty(window, 'outerHeight', { get: () => 800 });
+}
+
+// Fix iframe contentWindow
+try {
+    const getParameter = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function(parameter) {
+        if (parameter === 37445) return 'Intel Inc.';
+        if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+        return getParameter.call(this, parameter);
+    };
+} catch (err) {}
+"""
+
+# Enhanced context options with more realistic settings
+BASE_CONTEXT_OPTIONS = {
+    "viewport": {"width": 1920, "height": 1080},
+    "device_scale_factor": 1,
+    "is_mobile": False,
+    "has_touch": False,
+    "locale": "nl-NL",
+    "timezone_id": "Europe/Amsterdam",
+    "color_scheme": "light",
+    "java_script_enabled": True,
+    "bypass_csp": True,
+    "ignore_https_errors": True,
+    "extra_http_headers": {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "nl-NL,nl;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+    },
+}
+
+
+async def launch_browser_context(playwright, headless: bool = True):
+    """
+    Launch Chromium with anti-detection flags (AutomationControlled disabled).
+    """
+
+    # Anti-detection args
+    args = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-infobars",
+        "--window-position=0,0",
+        "--ignore-certifcate-errors",
+        "--ignore-certificate-errors-spki-list",
+        "--disable-accelerated-2d-canvas",
+        "--no-zygote",
+        "--window-size=1920,1080",
+    ]
+
+    if headless:
+        args.append("--headless=new")
+
+    launch_config = {
+        "headless": False if headless else False,
+        "args": args,
+        "ignore_default_args": ["--enable-automation"],
+    }
+
+    browser = await playwright.chromium.launch(**launch_config)
+    # Load persisted storage (cookies) if available to bypass consent
+    context_options = BASE_CONTEXT_OPTIONS.copy()
+    # Explicit UA to match expectation (can be tuned per env)
+    ua_string = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    context_options["user_agent"] = ua_string
+    if STORAGE_STATE_PATH.exists():
+        context = await browser.new_context(
+            **context_options, storage_state=str(STORAGE_STATE_PATH)
+        )
+    else:
+        context = await browser.new_context(**context_options)
+    await context.add_init_script(STEALTH_INIT_SCRIPT)
+    page = await context.new_page()
+    try:
+        await page.emulate_media(color_scheme="light")
+    except Exception:
+        pass
+
+    # Route: only block heavy media; leave scripts alone
+    async def _route_handler(route):
+        req = route.request
+        if req.resource_type in ("image", "media", "font"):
+            return await route.abort()
+        return await route.continue_()
+
+    try:
+        await context.route("**/*", _route_handler)
+    except Exception:
+        pass
+    page.set_default_timeout(DEFAULT_TIMEOUT)
+    page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
+    return browser, context, page
+
+
+async def _dismiss_cookie_iframe(page: Page):
+    """
+    Handle SourcePoint cookie dialogs that render inside cross-origin iframes.
+    """
+
+    # Try via frame locator first (more robust for cross-origin)
+    try:
+        fl = page.frame_locator(f"iframe[name^='{COOKIE_IFRAME_PREFIX}']")
+        for text in COOKIE_BUTTON_TEXTS:
+            try:
+                btn = fl.locator(f"button:has-text('{text}')")
+                await btn.first.click(timeout=1500)
+                await asyncio.sleep(0.5)
+                return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Fallback: iterate frames and try buttons by text
+    try:
+        for frame in page.frames:
+            name = frame.name or ""
+            if COOKIE_IFRAME_PREFIX in name:
+                for text in COOKIE_BUTTON_TEXTS:
+                    try:
+                        btn = frame.locator(f"button:has-text('{text}')")
+                        if await btn.first.is_visible(timeout=1000):
+                            logger.debug(
+                                f"Clicking cookie iframe button '{text}' in frame {name}"
+                            )
+                            await btn.first.click(timeout=2000)
+                            await asyncio.sleep(0.5)
+                            return True
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+
+    return False
+
+
+async def wait_for_main_content(
+    page: Page, consent_button_selector: Optional[str] = None
+):
+    """
+    Wait for Zalando's main content area to be present/visible, handling cookie prompts.
+
+    This is more reliable in headless mode where Zalando sometimes delays rendering
+    #main-content. We repeatedly try to dismiss the consent dialog and look for the
+    target selector within the overall DEFAULT_TIMEOUT window.
+    """
+
+    deadline = asyncio.get_running_loop().time() + (DEFAULT_TIMEOUT / 1000)
+    attempt = 1
+
+    # Ensure basic DOM is ready
+    try:
+        await page.wait_for_load_state("domcontentloaded", timeout=8000)
+        await page.locator("body").wait_for(state="attached", timeout=8000)
+    except Exception:
+        pass
+
+    while asyncio.get_running_loop().time() < deadline:
+        dismissed_iframe = await _dismiss_cookie_iframe(page)
+
+        if consent_button_selector and not dismissed_iframe:
+            try:
+                consent_btn = page.locator(consent_button_selector)
+                if await consent_btn.count():
+                    if await consent_btn.is_visible(timeout=1000):
+                        logger.debug(
+                            "Consent button visible while waiting for main content."
+                        )
+                        await consent_btn.click(timeout=3000)
+                        await asyncio.sleep(0.5)
+            except Exception:
+                pass
+
+        # Nudge rendering in headless: small scroll can trigger lazy mounts
+        try:
+            await page.evaluate("() => window.scrollBy(0, 100)")
+        except Exception:
+            pass
+
+        locator = page.locator(MAIN_CONTENT_SELECTOR)
+        try:
+            await locator.wait_for(state="attached", timeout=2000)
+            if await locator.first.is_visible():
+                logger.debug("Main content is visible.")
+                return True
+            # If attached but hidden behind animation/popup, wait a bit and continue.
+            logger.debug("Main content attached but not yet visible; retrying...")
+        except Exception:
+            logger.debug(
+                f"Attempt {attempt}: main content not ready yet, retrying...",
+                exc_info=False,
+            )
+
+        attempt += 1
+        await asyncio.sleep(1)
+
+    raise TimeoutError(
+        "Timed out waiting for Zalando #main-content to become available"
+    )
+
 
 # XPaths for pagination and product elements
 PAGINATION_XPATH = (
     '//*[@id="main-content"]/div/div[5]/div/div[2]/div[3]/ul/li[85]/nav/div/span'
 )
+
+
 PRODUCTS_CONTAINER_XPATH = '//*[@id="main-content"]/div/div[5]/div/div[2]/div[3]/ul'
 
 # XPaths for product detail page
@@ -105,32 +391,93 @@ class ZalandoScraper(BatchProcessingMixin):
         global_idx = 1
 
         async with async_playwright() as p:
-            # Launch browser
-            browser = await p.chromium.launch(**get_chromium_launch_config())
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            )
-            page = await context.new_page()
-            page.set_default_timeout(DEFAULT_TIMEOUT)
-            page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
+            # Launch browser with centralized configuration
+            browser, context, page = await launch_browser_context(p, headless=True)
+            consent_button_selector = CONSENT_BUTTON_SELECTOR
+
+            # Wire up verbose Playwright event logging so we can trace stuck requests
+            def _handle_console(msg):
+                try:
+                    logger.debug(f"[Console:{msg.type.lower()}] {msg.text}")
+                except Exception:
+                    pass
+
+            def _handle_request_failed(request):
+                try:
+                    failure = request.failure
+                    logger.warning(
+                        f"Request failed: {request.method} {request.url} -> {failure}"
+                    )
+                except Exception:
+                    pass
+
+            def _handle_response(response):
+                try:
+                    if response.status >= 400:
+                        logger.warning(
+                            f"HTTP {response.status} for {response.request.method} {response.url}"
+                        )
+                except Exception:
+                    pass
+
+            page.on("console", _handle_console)
+            page.on("requestfailed", _handle_request_failed)
+            page.on("response", _handle_response)
 
             try:
                 # Navigate to base URL with retry logic
                 logger.info(f"Navigating to {self.base_url}")
                 for attempt in range(MAX_RETRIES):
                     try:
+                        logger.debug(
+                            f"[Attempt {attempt + 1}/{MAX_RETRIES}] goto {self.base_url} "
+                            f"(wait_until='load', timeout={NAVIGATION_TIMEOUT}ms)"
+                        )
                         await page.goto(
-                            self.base_url, wait_until="load", timeout=NAVIGATION_TIMEOUT
+                            self.base_url,
+                            wait_until="domcontentloaded",
+                            timeout=NAVIGATION_TIMEOUT,
                         )
-                        await page.wait_for_selector(
-                            "#main-content", timeout=DEFAULT_TIMEOUT
+                        logger.debug(
+                            f"Page loaded. Current URL: {page.url} | Title: {await page.title()}"
                         )
+                        # Handle cookie consent overlay (appears frequently on Zalando)
+                        try:
+                            consent_btn = page.locator(consent_button_selector)
+                            if await consent_btn.is_visible(timeout=2000):
+                                logger.info(
+                                    "Clicking Zalando cookie consent button (base page)"
+                                )
+                                await consent_btn.click(timeout=5000)
+                                await asyncio.sleep(1)
+                        except Exception:
+                            logger.debug(
+                                "Cookie consent button not found or already dismissed"
+                            )
+                        await wait_for_main_content(page, consent_button_selector)
+                        # Persist storage state (cookies) after first success
+                        try:
+                            STORAGE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+                            await page.context.storage_state(
+                                path=str(STORAGE_STATE_PATH)
+                            )
+                        except Exception:
+                            pass
+                        logger.debug("#main-content detected; proceeding with scrape")
                         break
                     except Exception as e:
                         if attempt < MAX_RETRIES - 1:
                             logger.warning(
-                                f"Navigation attempt {attempt + 1} failed: {e}. Retrying..."
+                                f"Navigation attempt {attempt + 1} failed "
+                                f"({type(e).__name__}: {e}). Retrying after {RETRY_DELAY}s..."
                             )
+                            try:
+                                logger.debug(
+                                    f"Page URL after failure: {page.url} "
+                                    f"| response status unknown (timeout before load)"
+                                )
+                            except Exception:
+                                pass
                             await asyncio.sleep(RETRY_DELAY)
                         else:
                             logger.error(
@@ -159,11 +506,22 @@ class ZalandoScraper(BatchProcessingMixin):
                     for attempt in range(MAX_RETRIES):
                         try:
                             await page.goto(
-                                page_url, wait_until="load", timeout=NAVIGATION_TIMEOUT
+                                page_url,
+                                wait_until="domcontentloaded",
+                                timeout=NAVIGATION_TIMEOUT,
                             )
-                            await page.wait_for_selector(
-                                "#main-content", timeout=DEFAULT_TIMEOUT
-                            )
+
+                            try:
+                                consent_btn = page.locator(consent_button_selector)
+                                if await consent_btn.is_visible(timeout=2000):
+                                    logger.info(
+                                        f"Clicking cookie consent button on page {page_num}"
+                                    )
+                                    await consent_btn.click(timeout=5000)
+                                    await asyncio.sleep(1)
+                            except Exception:
+                                pass
+                            await wait_for_main_content(page, consent_button_selector)
                             break
                         except Exception as e:
                             if attempt < MAX_RETRIES - 1:
@@ -342,8 +700,8 @@ async def get_product_links(page: Page) -> List[str]:
     Finds all <a> tags with href containing product URLs inside the products container.
     """
     try:
-        # Wait for products container to be visible
-        await page.wait_for_selector(PRODUCTS_CONTAINER_XPATH, timeout=10000)
+        # Wait for products container to be visible (use locator-based wait to respect XPath)
+        await page.locator(PRODUCTS_CONTAINER_XPATH).first.wait_for(timeout=12000)
 
         # Get all product links
         links = await page.locator(
@@ -460,7 +818,8 @@ async def extract_product_details(page: Page, url: str) -> Dict[str, Any]:
     Extract brand, product name, image count, and shoe sole image URL from a product detail page.
     """
     try:
-        await page.goto(url, wait_until="load", timeout=NAVIGATION_TIMEOUT)
+        await page.goto(url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT)
+
         # Wait for main content instead of networkidle
         try:
             await page.wait_for_selector("#main-content", timeout=DEFAULT_TIMEOUT)
@@ -534,27 +893,27 @@ async def scrape_zalando_shoes(
         List of product dictionaries
     """
     products = []
+    consent_button_selector = CONSENT_BUTTON_SELECTOR
 
     async with async_playwright() as p:
-        # Launch browser with user-agent to avoid bot detection
-        browser = await p.chromium.launch(headless=headless)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
-        page = await context.new_page()
-        page.set_default_timeout(DEFAULT_TIMEOUT)
-        page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
+        browser, context, page = await launch_browser_context(p, headless=headless)
 
         try:
             # Navigate to base URL with retry logic
             logger.info(f"Navigating to {url}")
             for attempt in range(MAX_RETRIES):
                 try:
-                    await page.goto(url, wait_until="load", timeout=NAVIGATION_TIMEOUT)
-                    # Wait for main content to load
-                    await page.wait_for_selector(
-                        "#main-content", timeout=DEFAULT_TIMEOUT
+                    await page.goto(
+                        url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT
                     )
+                    # Wait for main content to load
+                    await wait_for_main_content(page, consent_button_selector)
+                    # Persist storage after first successful visit
+                    try:
+                        STORAGE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+                        await page.context.storage_state(path=str(STORAGE_STATE_PATH))
+                    except Exception:
+                        pass
                     break
                 except Exception as e:
                     if attempt < MAX_RETRIES - 1:
@@ -580,11 +939,11 @@ async def scrape_zalando_shoes(
                 for attempt in range(MAX_RETRIES):
                     try:
                         await page.goto(
-                            page_url, wait_until="load", timeout=NAVIGATION_TIMEOUT
+                            page_url,
+                            wait_until="domcontentloaded",
+                            timeout=NAVIGATION_TIMEOUT,
                         )
-                        await page.wait_for_selector(
-                            "#main-content", timeout=DEFAULT_TIMEOUT
-                        )
+                        await wait_for_main_content(page, consent_button_selector)
                         break
                     except Exception as e:
                         if attempt < MAX_RETRIES - 1:
