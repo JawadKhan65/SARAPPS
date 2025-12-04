@@ -10,6 +10,10 @@ from services.image_processor import ImageProcessor
 import hashlib
 import numpy as np
 from difflib import SequenceMatcher
+import re
+import io
+from PIL import Image
+import imagehash
 
 # Add line_tracing module to path
 line_tracing_path = os.path.join(os.path.dirname(__file__), "..", "line_tracing_utils")
@@ -39,6 +43,8 @@ class ScraperService:
         self.logger = logging.getLogger(__name__)
         self.processor = ImageProcessor()
         self.upload_folder = current_app.config.get("UPLOAD_FOLDER", "uploads")
+        # Tunable thresholds
+        self.phash_duplicate_distance = int(os.getenv("PHASH_DUP_DISTANCE", "4"))
 
     def calculate_image_hash(self, image_array):
         """Calculate SHA256 hash of image for deduplication"""
@@ -80,73 +86,117 @@ class ScraperService:
         )
 
         return normalized
-    
+
     def _fuzzy_name_match(self, name1, name2, threshold=0.85):
         """
         Check if two product names are similar using fuzzy matching
-        
+
         Args:
             name1: First product name
             name2: Second product name
             threshold: Similarity threshold (0-1), default 0.85 (85%)
-            
+
         Returns:
             bool: True if names are similar above threshold
         """
         if not name1 or not name2:
             return False
-        
+
         # Normalize names (lowercase, strip whitespace)
         n1 = name1.lower().strip()
         n2 = name2.lower().strip()
-        
+
         # Exact match
         if n1 == n2:
             return True
-        
+
         # Calculate similarity ratio
         similarity = SequenceMatcher(None, n1, n2).ratio()
-        
+
         return similarity >= threshold
-    
+
+    def _normalize_name(self, name: str) -> str:
+        if not name:
+            return ""
+        n = name.lower().strip()
+        n = re.sub(r"[\-_,.;:/]", " ", n)
+        n = re.sub(r"\b(size|color|colour|men|women|kids|boys|girls)\b", " ", n)
+        n = re.sub(r"\s+", " ", n).strip()
+        return n
+
+    def _extract_model_id(self, url: str, product_name: str = "") -> str:
+        if not url:
+            url = ""
+        m = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", url)  # Amazon ASIN
+        if m:
+            return m.group(1)
+        m = re.search(r"\b([A-Z]{2}\d{4}-\d{3})\b", product_name or "")  # Nike
+        if m:
+            return m.group(1)
+        m = re.search(r"article/(?:[A-Z0-9-]+)", url)  # Zalando heuristic
+        if m:
+            return m.group(0)
+        return ""
+
+    def _phash_from_bytes(self, img_bytes: bytes):
+        try:
+            img = Image.open(io.BytesIO(img_bytes)).convert("L")
+            h = imagehash.phash(img)
+            return str(h)
+        except Exception:
+            return None
+
     def _check_duplicate_advanced(self, product, normalized_url):
         """
         Advanced duplicate detection using multiple factors
-        
+
         Priority Order:
         1. Brand + Product Name similarity (PRIMARY - fuzzy match)
         2. Exact URL match (SECONDARY - fallback)
         3. Image hash (future enhancement)
-        
+
         Args:
             product: Product dict with brand, product_name, url
             normalized_url: Normalized product URL
-            
+
         Returns:
             tuple: (is_duplicate: bool, reason: str, match: SoleImage or None)
         """
-        # PRIMARY CHECK: Fuzzy name + brand match
+        # PRIMARY: Site-specific stable identifier
+        model_id = self._extract_model_id(
+            product.get("url", ""), product.get("product_name", "")
+        )
+        if model_id:
+            existing_by_model = SoleImage.query.filter_by(model_id=model_id).first()
+            if existing_by_model:
+                return True, "model_id_exact", existing_by_model
+
+        # SECONDARY: Fuzzy name + brand match
         # This is the most reliable indicator of duplicates
         brand = product.get("brand", "").strip()
-        product_name = product.get("product_name", "").strip()
-        
+        product_name = self._normalize_name(product.get("product_name", "").strip())
+
         if brand and product_name:
             # Get all products from same brand (limit for performance)
-            similar_products = SoleImage.query.filter(
-                SoleImage.brand.ilike(brand)
-            ).limit(1000).all()
-            
+            similar_products = (
+                SoleImage.query.filter(SoleImage.brand.ilike(brand)).limit(1000).all()
+            )
+
             # Check for name similarity (90% threshold)
             for similar in similar_products:
-                if self._fuzzy_name_match(product_name, similar.product_name, threshold=0.90):
+                if self._fuzzy_name_match(
+                    product_name,
+                    self._normalize_name(similar.product_name),
+                    threshold=0.92,
+                ):
                     # High name similarity + same brand = likely duplicate
                     self.logger.debug(
                         f"🔍 PRIMARY: Fuzzy match detected: '{product_name}' ~= '{similar.product_name}' "
-                        f"(Brand: {brand}, Similarity: {SequenceMatcher(None, product_name.lower(), similar.product_name.lower()).ratio()*100:.1f}%)"
+                        f"(Brand: {brand}, Similarity: {SequenceMatcher(None, product_name.lower(), similar.product_name.lower()).ratio() * 100:.1f}%)"
                     )
                     return True, "fuzzy_name_match_primary", similar
-        
-        # SECONDARY CHECK: Exact URL match (fallback)
+
+        # TERTIARY: Exact URL match (fallback)
         # Only used if name matching didn't find a duplicate
         existing = SoleImage.query.filter_by(source_url=normalized_url).first()
         if existing:
@@ -154,7 +204,7 @@ class ScraperService:
                 f"🔗 SECONDARY: URL match detected: {normalized_url[:80]}"
             )
             return True, "exact_url_secondary", existing
-        
+
         # Also check original URL if different
         if normalized_url != product["url"]:
             existing = SoleImage.query.filter_by(source_url=product["url"]).first()
@@ -163,7 +213,34 @@ class ScraperService:
                     f"🔗 SECONDARY: Original URL match detected: {product['url'][:80]}"
                 )
                 return True, "original_url_secondary", existing
-        
+
+        # QUATERNARY: Perceptual hash close match
+        try:
+            phash = None
+            if product.get("image_bytes"):
+                phash = self._phash_from_bytes(product["image_bytes"])
+            elif product.get("image_path") and os.path.exists(product["image_path"]):
+                with open(product["image_path"], "rb") as f:
+                    phash = self._phash_from_bytes(f.read())
+            if phash:
+                recent = (
+                    SoleImage.query.order_by(SoleImage.crawled_at.desc())
+                    .limit(200)
+                    .all()
+                )
+                for r in recent:
+                    if getattr(r, "phash", None):
+                        try:
+                            d = imagehash.hex_to_hash(phash) - imagehash.hex_to_hash(
+                                r.phash
+                            )
+                            if d <= self.phash_duplicate_distance:
+                                return True, "phash_close", r
+                        except Exception:
+                            continue
+        except Exception:
+            pass
+
         # Not a duplicate - this is a unique product!
         return False, None, None
 
@@ -429,6 +506,10 @@ class ScraperService:
                     brand=product.get("brand", "Unknown").strip()[:100],
                     product_type=product.get("product_type", "Unknown").strip()[:100],
                     product_name=product.get("product_name", "").strip()[:255],
+                    model_id=self._extract_model_id(
+                        product.get("url", ""), product.get("product_name", "")
+                    )
+                    or None,
                     # File paths (legacy/fallback - optional)
                     original_image_path=original_image_ref,
                     processed_image_path=processed_path,
@@ -438,6 +519,9 @@ class ScraperService:
                     image_format=image_format,
                     # Hash and vectors
                     image_hash=image_hash,
+                    phash=self._phash_from_bytes(original_image_bytes)
+                    if original_image_bytes
+                    else None,
                     feature_vector=self.processor.serialize_features(
                         process_result["features"]
                     ),
