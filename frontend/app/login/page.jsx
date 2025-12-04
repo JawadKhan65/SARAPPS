@@ -34,6 +34,9 @@ function LoginPageContent() {
         }
     }, []);
 
+    const MAX_PASSWORD_LENGTH = 64;
+    const MIN_PASSWORD_LENGTH = 9;
+
     const validateForm = () => {
         const newErrors = {};
 
@@ -45,8 +48,10 @@ function LoginPageContent() {
 
         if (!password) {
             newErrors.password = 'Password is required';
-        } else if (password.length < 8) {
-            newErrors.password = 'Password must be at least 8 characters';
+        } else if (password.length < MIN_PASSWORD_LENGTH) {
+            newErrors.password = `Password must be at least ${MIN_PASSWORD_LENGTH} characters`;
+        } else if (password.length > MAX_PASSWORD_LENGTH) {
+            newErrors.password = `Password must be at most ${MAX_PASSWORD_LENGTH} characters`;
         }
 
         setErrors(newErrors);
@@ -233,6 +238,7 @@ function LoginPageContent() {
                                         }}
                                         error={errors.password}
                                         placeholder="••••••••"
+                                        maxLength={MAX_PASSWORD_LENGTH}
                                         required
                                         leftIcon={
                                             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -303,7 +309,7 @@ function LoginPageContent() {
                                             </svg>
                                         }
                                     />
-                                    
+
                                     {/* Resend Code Button */}
                                     <div className="mt-3 text-center">
                                         <button

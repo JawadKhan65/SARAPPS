@@ -20,7 +20,7 @@ from werkzeug.security import generate_password_hash
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.extensions import db
-from core.models import User, UploadedImage, SoleImage, MatchResult, Crawler, AdminUser, MatchHistory, MatchDetail
+from core.models import User, UploadedImage, SoleImage, MatchResult, Crawler, AdminUser
 from app import create_app
 import uuid
 
@@ -47,9 +47,7 @@ def init_database():
                 connection.execute(db.text("CREATE EXTENSION IF NOT EXISTS pgvector"))
                 logger.info("✓ PostgreSQL pgvector extension enabled")
             except Exception as e:
-                logger.warning(
-                    f"⚠️ pgvector extension not available: {e}"
-                )
+                logger.warning(f"⚠️ pgvector extension not available: {e}")
                 logger.warning(
                     "   Vector search will not work. Install pgvector or tables will use LargeBinary fallback."
                 )
@@ -122,7 +120,7 @@ def create_indexes():
                     "CREATE INDEX IF NOT EXISTS idx_match_results_similarity ON match_results(overall_similarity DESC)"
                 )
             )
-            
+
             # Match History indexes
             connection.execute(
                 db.text(
@@ -139,7 +137,7 @@ def create_indexes():
                     "CREATE INDEX IF NOT EXISTS idx_match_history_best_score ON match_history(best_score DESC)"
                 )
             )
-            
+
             # Match Detail indexes
             connection.execute(
                 db.text(
@@ -203,20 +201,24 @@ def create_indexes():
 
             # Try to create vector indexes if pgvector is available
             try:
-                logger.info("Creating pgvector indexes (this may take several minutes for large datasets)...")
-                
+                logger.info(
+                    "Creating pgvector indexes (this may take several minutes for large datasets)..."
+                )
+
                 # Check if vector columns exist and have data
                 result = connection.execute(
-                    db.text("SELECT COUNT(*) FROM sole_images WHERE clip_embedding IS NOT NULL")
+                    db.text(
+                        "SELECT COUNT(*) FROM sole_images WHERE clip_embedding IS NOT NULL"
+                    )
                 )
                 vector_count = result.scalar()
-                
+
                 if vector_count > 0:
                     # Only create indexes if we have vector data
                     # IVFFlat index for approximate nearest neighbor search
                     # lists parameter should be sqrt(num_rows) for optimal performance
-                    lists = max(10, min(100, int(vector_count ** 0.5)))
-                    
+                    lists = max(10, min(100, int(vector_count**0.5)))
+
                     connection.execute(
                         db.text(f"""
                             CREATE INDEX IF NOT EXISTS idx_sole_images_clip_embedding 
@@ -225,7 +227,7 @@ def create_indexes():
                         """)
                     )
                     logger.info(f"✓ Created CLIP embedding index with {lists} lists")
-                    
+
                     connection.execute(
                         db.text(f"""
                             CREATE INDEX IF NOT EXISTS idx_sole_images_edge_embedding 
@@ -234,7 +236,7 @@ def create_indexes():
                         """)
                     )
                     logger.info(f"✓ Created edge embedding index with {lists} lists")
-                    
+
                     connection.execute(
                         db.text(f"""
                             CREATE INDEX IF NOT EXISTS idx_sole_images_texture_embedding 
@@ -244,11 +246,15 @@ def create_indexes():
                     )
                     logger.info(f"✓ Created texture embedding index with {lists} lists")
                 else:
-                    logger.info("ℹ No vector data found. Vector indexes will be created after backfilling embeddings.")
-                    
+                    logger.info(
+                        "ℹ No vector data found. Vector indexes will be created after backfilling embeddings."
+                    )
+
             except Exception as e:
                 logger.info(f"ℹ pgvector indexes not created: {e}")
-                logger.info("  This is expected if pgvector extension is not installed or no vector data exists yet.")
+                logger.info(
+                    "  This is expected if pgvector extension is not installed or no vector data exists yet."
+                )
 
             logger.info("✓ All indexes created successfully")
 
@@ -257,35 +263,58 @@ def create_indexes():
 
 
 def create_default_admin():
-    """Create default admin user."""
-    logger.info("Creating default admin user...")
+    """Create default admin users."""
+    logger.info("Creating default admin users...")
+
+    default_admin_emails = [
+        "jawadkhan10322@gmail.com",
+        "mikebravens26april@gmail.com",
+        "mikevdsman@gmail.com",
+        "m.vandersman@keytalk.com",
+        "admin@sarapps.com",
+    ]
+
+    created = []
+    skipped = []
 
     try:
-        # Check if admin already exists
-        admin = AdminUser.query.filter_by(email="jawadkhan10322@gmail.com").first()
-        if admin:
-            logger.info("✓ Admin user already exists")
-            return
+        for email in default_admin_emails:
+            existing = AdminUser.query.filter_by(email=email).first()
+            if existing:
+                skipped.append(email)
+                continue
 
-        # Create new admin
-        admin = AdminUser(
-            id=str(uuid.uuid4()),
-            email="jawadkhan10322@gmail.com",
-            username="admin",
-            password_hash=hash_password("admin123"),
-            is_active=True,
-            mfa_enabled=True,
-        )
+            username = email.split("@")[0]
+            admin = AdminUser(
+                id=str(uuid.uuid4()),
+                email=email,
+                username=username,
+                password_hash=hash_password("admin123"),
+                is_active=True,
+                mfa_enabled=True,
+            )
+            db.session.add(admin)
+            created.append(email)
 
-        db.session.add(admin)
-        db.session.commit()
+        if created:
+            db.session.commit()
 
-        logger.info("✓ Default admin user created")
-        logger.info("  Email: jawadkhan10322@gmail.com")
-        logger.info("  Password: admin123 (please change on first login)")
+        if created:
+            logger.info("✓ Created default admin users:")
+            for e in created:
+                logger.info(
+                    f"  - {e} (password: admin123; please change on first login)"
+                )
+        else:
+            logger.info("✓ All default admin users already exist")
+
+        if skipped:
+            logger.info("Skipped existing admin users:")
+            for e in skipped:
+                logger.info(f"  - {e}")
 
     except Exception as e:
-        logger.error(f"✗ Error creating admin user: {e}")
+        logger.error(f"✗ Error creating admin users: {e}")
         db.session.rollback()
         raise
 
@@ -560,12 +589,16 @@ def create_admin(email, password):
                 return
 
             # Create admin
+            # Extract username from email
+            username = email.split("@")[0]
+
             admin = AdminUser(
                 id=str(uuid.uuid4()),
+                username=username,
                 email=email,
                 password_hash=hash_password(password),
-                admin_level="super",
                 is_active=True,
+                mfa_enabled=False,
             )
 
             db.session.add(admin)

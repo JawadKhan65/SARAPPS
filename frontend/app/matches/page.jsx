@@ -14,6 +14,8 @@ export default function MatchesPage() {
     const [error, setError] = useState('');
     const [filter, setFilter] = useState('all');
     const [page, setPage] = useState(1);
+    const [thumbs, setThumbs] = useState({}); // { historyId: { uploaded, sole } }
+    const [featurePanels, setFeaturePanels] = useState({}); // { historyId: { loading, data } }
 
     if (!isAuthenticated) {
         router.push('/login');
@@ -37,6 +39,34 @@ export default function MatchesPage() {
         }
     };
 
+    // Load thumbnails when matches change
+    useEffect(() => {
+        (async () => {
+            const list = matches || [];
+            for (const m of list) {
+                const historyId = m.id;
+                const upd = { ...(thumbs[historyId] || {}) };
+                try {
+                    if (m.uploaded_image_id && !upd.uploaded) {
+                        const up = await userAPI.getUploadedImage(m.uploaded_image_id);
+                        upd.uploaded = up.data.image;
+                    }
+                } catch (e) { }
+                try {
+                    const soleId = m.shoe?.id;
+                    if (soleId && !upd.sole) {
+                        const so = await userAPI.getSoleImageOriginal(soleId);
+                        upd.sole = so.data.image;
+                    }
+                } catch (e) { }
+                if (upd.uploaded || upd.sole) {
+                    setThumbs((prev) => ({ ...prev, [historyId]: upd }));
+                }
+            }
+        })();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [matches]);
+
     const getTierBadge = (similarity) => {
         if (similarity > 0.9) return { label: 'Perfect Match', color: 'bg-green-100 text-green-800' };
         if (similarity > 0.75) return { label: 'High Confidence', color: 'bg-blue-100 text-blue-800' };
@@ -59,6 +89,8 @@ export default function MatchesPage() {
                         </button>
                         <button
                             onClick={() => {
+                                const ok = typeof window !== 'undefined' ? window.confirm('Are you sure you want to log out?') : true;
+                                if (!ok) return;
                                 useAuthStore.getState().logout();
                                 router.push('/login');
                             }}
@@ -133,7 +165,24 @@ export default function MatchesPage() {
                                     className="bg-white rounded-lg shadow hover:shadow-lg transition"
                                 >
                                     <div className="p-6">
-                                        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-center">
+                                        <div className="grid grid-cols-1 md:grid-cols-5 gap-4 items-center">
+                                            {/* Thumbnails */}
+                                            <div className="flex gap-2">
+                                                <div className="w-16 h-16 bg-gray-100 rounded overflow-hidden border">
+                                                    {thumbs[match.id]?.uploaded ? (
+                                                        <img src={thumbs[match.id].uploaded} alt="Uploaded" className="w-full h-full object-cover" />
+                                                    ) : (
+                                                        <div className="w-full h-full flex items-center justify-center text-[10px] text-gray-400">Uploaded</div>
+                                                    )}
+                                                </div>
+                                                <div className="w-16 h-16 bg-gray-100 rounded overflow-hidden border">
+                                                    {thumbs[match.id]?.sole ? (
+                                                        <img src={thumbs[match.id].sole} alt="Match" className="w-full h-full object-cover" />
+                                                    ) : (
+                                                        <div className="w-full h-full flex items-center justify-center text-[10px] text-gray-400">Match</div>
+                                                    )}
+                                                </div>
+                                            </div>
                                             {/* Product Info */}
                                             <div>
                                                 <p className="text-sm text-gray-500">Top Match</p>
@@ -240,6 +289,55 @@ export default function MatchesPage() {
                                             </div>
                                         </details>
                                     )}
+
+                                    {/* AI Breakdown Panel */}
+                                    <details className="border-t border-gray-200">
+                                        <summary className="cursor-pointer px-6 py-3 bg-gray-50 hover:bg-gray-100 transition-colors text-sm font-semibold text-gray-700">
+                                            🔬 Show AI Breakdown
+                                        </summary>
+                                        <div className="p-6 bg-white">
+                                            {!featurePanels[match.id]?.data && !featurePanels[match.id]?.loading && (
+                                                <button
+                                                    className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm"
+                                                    onClick={async () => {
+                                                        setFeaturePanels((p) => ({ ...p, [match.id]: { loading: true } }));
+                                                        try {
+                                                            const res = await userAPI.getImageFeatures(match.uploaded_image_id);
+                                                            setFeaturePanels((p) => ({ ...p, [match.id]: { loading: false, data: res.data } }));
+                                                        } catch (e) {
+                                                            setFeaturePanels((p) => ({ ...p, [match.id]: { loading: false, data: null } }));
+                                                        }
+                                                    }}
+                                                >
+                                                    Load Breakdown
+                                                </button>
+                                            )}
+                                            {featurePanels[match.id]?.loading && (
+                                                <p className="text-sm text-gray-500">Loading features…</p>
+                                            )}
+                                            {featurePanels[match.id]?.data && (
+                                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                                    {[
+                                                        ['L Channel', 'l_channel'],
+                                                        ['A Channel', 'a_channel'],
+                                                        ['B Channel', 'b_channel'],
+                                                        ['Denoised L', 'denoised_l'],
+                                                        ['Enhanced L', 'enhanced_l'],
+                                                        ['Binary Pattern', 'binary_pattern'],
+                                                        ['Cleaned Pattern', 'cleaned_pattern'],
+                                                        ['LBP Map', 'lbp'],
+                                                    ].map(([title, key]) => (
+                                                        <div key={key} className="text-center">
+                                                            <div className="w-full aspect-square bg-gray-100 rounded border overflow-hidden mb-2">
+                                                                <img src={featurePanels[match.id].data[key]} alt={title} className="w-full h-full object-contain" />
+                                                            </div>
+                                                            <p className="text-xs text-gray-600 font-semibold">{title}</p>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </details>
                                 </div>
                             );
                         })}

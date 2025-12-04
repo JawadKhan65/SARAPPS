@@ -78,7 +78,7 @@ export const userAPI = {
             headers: { 'Content-Type': 'multipart/form-data' },
         }),
 
-    identifyShoe: (imageId, limit = 4) =>
+    identifyShoe: (imageId, limit = 20) =>
         api.post(`/user/match-image/${imageId}`, { limit }),
 
     getMatches: (params = {}) =>
@@ -94,6 +94,9 @@ export const userAPI = {
 
     getSoleImageOriginal: (soleImageId) =>
         api.get(`/user/sole-image/${soleImageId}/original`),
+
+    getUploadedImage: (imageId) =>
+        api.get(`/user/uploaded-image/${imageId}`),
 };
 
 export const matchesAPI = {

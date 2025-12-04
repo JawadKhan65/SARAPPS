@@ -14,6 +14,7 @@ export default function RegisterPage() {
     const [passwordError, setPasswordError] = useState('');
     const { register, isLoading, error } = useAuthStore();
 
+    const MAX_PASSWORD_LENGTH = 64;
     const handleSubmit = async (e) => {
         e.preventDefault();
         setPasswordError('');
@@ -25,6 +26,11 @@ export default function RegisterPage() {
 
         if (password.length < 9) {
             setPasswordError('Password must be at least 9 characters');
+            return;
+        }
+
+        if (password.length > MAX_PASSWORD_LENGTH) {
+            setPasswordError(`Password must be at most ${MAX_PASSWORD_LENGTH} characters`);
             return;
         }
 
@@ -100,6 +106,7 @@ export default function RegisterPage() {
                                 value={password}
                                 onChange={(e) => setPassword(e.target.value)}
                                 required
+                                maxLength={MAX_PASSWORD_LENGTH}
                                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                                 placeholder="••••••••"
                             />
@@ -115,6 +122,7 @@ export default function RegisterPage() {
                                 value={confirmPassword}
                                 onChange={(e) => setConfirmPassword(e.target.value)}
                                 required
+                                maxLength={MAX_PASSWORD_LENGTH}
                                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                                 placeholder="••••••••"
                             />

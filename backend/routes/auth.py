@@ -26,6 +26,10 @@ from core.config.firebase_config import (
 
 auth_bp = Blueprint("auth", __name__)
 
+# Password policy
+MIN_PASSWORD_LENGTH = 9
+MAX_PASSWORD_LENGTH = 64
+
 
 @auth_bp.route("/health", methods=["GET"])
 def health_check():
@@ -114,9 +118,16 @@ def register():
     ):
         return jsonify({"error": "Missing required fields"}), 400
 
-    # Validate password length (minimum 9 characters for security)
-    if len(data.get("password", "")) < 9:
-        return jsonify({"error": "Password must be at least 9 characters"}), 400
+    # Validate password length (minimum and maximum)
+    password = data.get("password", "")
+    if len(password) < MIN_PASSWORD_LENGTH:
+        return jsonify(
+            {"error": f"Password must be at least {MIN_PASSWORD_LENGTH} characters"}
+        ), 400
+    if len(password) > MAX_PASSWORD_LENGTH:
+        return jsonify(
+            {"error": f"Password must be at most {MAX_PASSWORD_LENGTH} characters"}
+        ), 400
 
     # Check if user exists
     if User.query.filter_by(email=data["email"]).first():
@@ -655,38 +666,41 @@ def forgot_password():
 
     user = User.query.filter_by(email=data["email"]).first()
 
-    if not user:
-        return jsonify(
-            {"error": "Email not found. Please check your email address."}
-        ), 404
+    # Always return a generic success response to avoid disclosing account existence
+    if user:
+        # Generate 6-digit OTP
+        otp_code = secrets.randbelow(1000000)
+        user.otp_code = str(otp_code).zfill(6)
+        user.otp_code_expiry = datetime.utcnow() + timedelta(minutes=10)
+        db.session.commit()
 
-    # Generate 6-digit OTP
-    otp_code = secrets.randbelow(1000000)
-    user.otp_code = str(otp_code).zfill(6)
-    user.otp_code_expiry = datetime.utcnow() + timedelta(minutes=10)
-    db.session.commit()
-
-    current_app.logger.info(f"🔐 Password reset OTP for {user.email}: {user.otp_code}")
-
-    # Send OTP email
-    try:
-        html_content = render_template(
-            "password_reset_otp.html",
-            username=user.username or user.email.split("@")[0],
-            otp_code=user.otp_code,
-            expiry_minutes=10,
+        current_app.logger.info(
+            f"🔐 Password reset OTP for {user.email}: {user.otp_code}"
         )
-        send_email(
-            user.email,
-            "STIP - Password Reset Verification Code",
-            f"Your password reset verification code is: {user.otp_code}\n\nThis code will expire in 10 minutes.",
-            html=html_content,
-        )
-        current_app.logger.info(f"✅ Password reset OTP sent to {user.email}")
-    except Exception as e:
-        current_app.logger.error(f"Failed to send password reset OTP: {str(e)}")
 
-    return jsonify({"message": "OTP sent to email", "email": user.email}), 200
+        # Send OTP email
+        try:
+            html_content = render_template(
+                "password_reset_otp.html",
+                username=user.username or user.email.split("@")[0],
+                otp_code=user.otp_code,
+                expiry_minutes=10,
+            )
+            send_email(
+                user.email,
+                "STIP - Password Reset Verification Code",
+                f"Your password reset verification code is: {user.otp_code}\n\nThis code will expire in 10 minutes.",
+                html=html_content,
+            )
+            current_app.logger.info(f"✅ Password reset OTP sent to {user.email}")
+        except Exception as e:
+            current_app.logger.error(f"Failed to send password reset OTP: {str(e)}")
+
+    return jsonify(
+        {
+            "message": "If an account exists for this email, a verification code has been sent."
+        }
+    ), 200
 
 
 @auth_bp.route("/verify-reset-otp", methods=["POST"])
@@ -731,8 +745,14 @@ def reset_password():
     if not data or not data.get("reset_token") or not data.get("new_password"):
         return jsonify({"error": "Reset token and new password required"}), 400
 
-    if len(data["new_password"]) < 9:
-        return jsonify({"error": "Password must be at least 9 characters"}), 400
+    if len(data["new_password"]) < MIN_PASSWORD_LENGTH:
+        return jsonify(
+            {"error": f"Password must be at least {MIN_PASSWORD_LENGTH} characters"}
+        ), 400
+    if len(data["new_password"]) > MAX_PASSWORD_LENGTH:
+        return jsonify(
+            {"error": f"Password must be at most {MAX_PASSWORD_LENGTH} characters"}
+        ), 400
 
     user = User.query.filter_by(reset_token=data["reset_token"]).first()
 

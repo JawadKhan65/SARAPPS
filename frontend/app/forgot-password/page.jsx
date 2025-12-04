@@ -17,6 +17,8 @@ export default function ForgotPasswordPage() {
     const [loading, setLoading] = useState(false);
     const [message, setMessage] = useState('');
 
+    const MAX_PASSWORD_LENGTH = 64;
+
     const handleSendOTP = async (e) => {
         e.preventDefault();
         setError('');
@@ -25,10 +27,12 @@ export default function ForgotPasswordPage() {
 
         try {
             const response = await authAPI.forgotPassword(email);
-            setMessage('Verification code sent to your email');
+            setMessage('If an account exists, a verification code has been sent to your email');
             setStep(2);
         } catch (err) {
-            setError(err.response?.data?.error || 'Failed to send verification code');
+            // Always show generic message regardless of specific error to avoid account enumeration
+            setMessage('If an account exists, a verification code has been sent to your email');
+            setStep(2);
         } finally {
             setLoading(false);
         }
@@ -64,6 +68,11 @@ export default function ForgotPasswordPage() {
             return;
         }
 
+        if (newPassword.length > MAX_PASSWORD_LENGTH) {
+            setError(`Password must be at most ${MAX_PASSWORD_LENGTH} characters`);
+            return;
+        }
+
         if (newPassword !== confirmPassword) {
             setError('Passwords do not match');
             return;
@@ -91,9 +100,9 @@ export default function ForgotPasswordPage() {
 
         try {
             await authAPI.forgotPassword(email);
-            setMessage('New verification code sent to your email');
+            setMessage('If an account exists, a new code has been sent');
         } catch (err) {
-            setError(err.response?.data?.error || 'Failed to resend code');
+            setMessage('If an account exists, a new code has been sent');
         } finally {
             setLoading(false);
         }
@@ -236,6 +245,7 @@ export default function ForgotPasswordPage() {
                                     onChange={(e) => setNewPassword(e.target.value)}
                                     required
                                     minLength={9}
+                                    maxLength={MAX_PASSWORD_LENGTH}
                                     className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-gray-900"
                                     placeholder="At least 9 characters"
                                 />
@@ -251,6 +261,7 @@ export default function ForgotPasswordPage() {
                                     onChange={(e) => setConfirmPassword(e.target.value)}
                                     required
                                     minLength={9}
+                                    maxLength={MAX_PASSWORD_LENGTH}
                                     className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-gray-900"
                                     placeholder="Re-enter your password"
                                 />

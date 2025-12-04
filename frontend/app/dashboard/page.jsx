@@ -22,7 +22,7 @@ export default function DashboardPage() {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
     const [dragActive, setDragActive] = useState(false);
-    const [matchLimit, setMatchLimit] = useState(null); // null = all matches
+    const [matchLimit, setMatchLimit] = useState(20); // default to top 20 matches
     const [displayedMatches, setDisplayedMatches] = useState(12); // Show 12 initially
     const [imageId, setImageId] = useState(null);
     const [totalMatches, setTotalMatches] = useState(0);
@@ -319,20 +319,39 @@ export default function DashboardPage() {
                         )}
                     </div>
 
-                    {/* Match Info Banner - Shows ALL matches */}
+                    {/* Match Info Banner - Match limit selector */}
                     <div className="mb-6 p-4 bg-gradient-to-r from-blue-50 to-purple-50 rounded-xl border border-blue-200">
-                        <div className="text-center">
-                            <p className="text-sm font-semibold text-gray-700 mb-1">
-                                🔍 Smart Matching Enabled
-                            </p>
-                            <p className="text-xs text-gray-600">
-                                Finding ALL matches in our database for the best results
-                            </p>
-                            {totalMatches > 0 && (
-                                <p className="text-sm font-bold text-blue-600 mt-2">
-                                    Found {totalMatches} total matches
+                        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                            <div className="text-center md:text-left">
+                                <p className="text-sm font-semibold text-gray-700 mb-1">
+                                    🔍 Smart Matching Enabled
                                 </p>
-                            )}
+                                <p className="text-xs text-gray-600">
+                                    {matchLimit ? `Finding top ${matchLimit} matches` : 'Finding ALL matches'} in our database
+                                </p>
+                                {totalMatches > 0 && (
+                                    <p className="text-sm font-bold text-blue-600 mt-2">
+                                        Found {totalMatches} total matches
+                                    </p>
+                                )}
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                                <label className="text-xs font-semibold text-gray-700">Results:</label>
+                                <select
+                                    className="px-3 py-2 bg-white border border-blue-200 rounded-lg text-sm"
+                                    value={matchLimit ?? 'all'}
+                                    onChange={(e) => setMatchLimit(e.target.value === 'all' ? null : Number(e.target.value))}
+                                    disabled={loading}
+                                >
+                                    <option value={4}>Top 4</option>
+                                    <option value={10}>Top 10</option>
+                                    <option value={20}>Top 20</option>
+                                    <option value={50}>Top 50</option>
+                                    <option value={100}>Top 100</option>
+                                    <option value={'all'}>All</option>
+                                </select>
+                            </div>
                         </div>
                     </div>
 

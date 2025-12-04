@@ -8,7 +8,14 @@ import os
 import sys
 from datetime import datetime, timedelta
 from core.extensions import db, mail
-from core.models import User, UploadedImage, MatchResult, SoleImage, MatchHistory, MatchDetail
+from core.models import (
+    User,
+    UploadedImage,
+    MatchResult,
+    SoleImage,
+    MatchHistory,
+    MatchDetail,
+)
 from services.image_processor import ImageProcessor
 import numpy as np
 import cv2 as cv
@@ -226,7 +233,7 @@ def match_image(image_id):
     # Get limit from request body (default: None = all matches, max: 100 for performance)
     data = request.get_json() or {}
     requested_limit = data.get("limit")
-    
+
     if requested_limit is None:
         limit = None  # Return all matches
     else:
@@ -265,24 +272,30 @@ def match_image(image_id):
         # === STAGE 1: Fast Vector Search using pgvector (10-50ms for 10,000 images!) ===
         # Extract vectors from uploaded image
         uploaded_vectors = processor.extract_vector_embeddings(
-            uploaded_img_array if uploaded_img_array.ndim == 3 else cv.cvtColor(uploaded_img_array, cv.COLOR_GRAY2BGR),
-            uploaded_image.file_path
+            uploaded_img_array
+            if uploaded_img_array.ndim == 3
+            else cv.cvtColor(uploaded_img_array, cv.COLOR_GRAY2BGR),
+            uploaded_image.file_path,
         )
-        
-        clip_vec = uploaded_vectors.get('clip_vector')
-        edge_vec = uploaded_vectors.get('edge_vector')
-        texture_vec = uploaded_vectors.get('texture_vector')
-        
+
+        clip_vec = uploaded_vectors.get("clip_vector")
+        edge_vec = uploaded_vectors.get("edge_vector")
+        texture_vec = uploaded_vectors.get("texture_vector")
+
         # Try vector-based search first (much faster!)
         candidates = []
         try:
             from sqlalchemy import text
-            
+
             # Multi-vector ensemble query using pgvector
             # Combine CLIP (40%), Edge (35%), Texture (25%)
-            if clip_vec is not None and edge_vec is not None and texture_vec is not None:
+            if (
+                clip_vec is not None
+                and edge_vec is not None
+                and texture_vec is not None
+            ):
                 current_app.logger.info("Using pgvector fast similarity search...")
-                
+
                 candidates_query = text("""
                     SELECT 
                         id,
@@ -303,25 +316,27 @@ def match_image(image_id):
                     ORDER BY vector_similarity DESC
                     LIMIT 50
                 """)
-                
+
                 result = db.session.execute(
                     candidates_query,
                     {
                         "clip_vec": clip_vec.tolist(),
                         "edge_vec": edge_vec.tolist(),
                         "texture_vec": texture_vec.tolist(),
-                    }
+                    },
                 )
-                
+
                 # Convert results to candidate format
                 for row in result:
                     sole_image = SoleImage.query.get(row.id)
                     if sole_image:
-                        candidates.append({
-                            "sole_image": sole_image,
-                            "quick_score": float(row.vector_similarity)
-                        })
-                
+                        candidates.append(
+                            {
+                                "sole_image": sole_image,
+                                "quick_score": float(row.vector_similarity),
+                            }
+                        )
+
                 current_app.logger.info(
                     f"✓ Vector search found {len(candidates)} candidates in <50ms"
                 )
@@ -330,12 +345,12 @@ def match_image(image_id):
                 f"Vector search failed, falling back to linear search: {str(e)}"
             )
             candidates = []
-        
+
         # Fallback to legacy feature-based search if vector search failed or returned no results
         if not candidates:
             current_app.logger.info("Using legacy linear feature search...")
             sole_images = SoleImage.query.all()
-            
+
             for sole_image in sole_images:
                 # Quick feature-based similarity check
                 if uploaded_features and sole_image.feature_vector:
@@ -354,11 +369,11 @@ def match_image(image_id):
                             f"Feature comparison failed for {sole_image.id}: {str(e)}"
                         )
                         continue
-            
+
             # Sort candidates by quick score
             candidates.sort(key=lambda x: x["quick_score"], reverse=True)
             candidates = candidates[:50]  # Take top 50
-        
+
         top_candidates = candidates
 
         # Step 2: Now use compare_sole_images on top candidates for accurate matching
@@ -437,7 +452,7 @@ def match_image(image_id):
 
         # Sort by confidence
         matches.sort(key=lambda x: x["confidence"], reverse=True)
-        
+
         # Apply limit if specified, otherwise return all
         if limit is not None:
             top_matches = matches[:limit]
@@ -510,7 +525,7 @@ def match_image(image_id):
         )
 
         db.session.add(match_result)
-        
+
         # === NEW: Save to MatchHistory and MatchDetail tables ===
         # Create match history record
         match_history = MatchHistory(
@@ -520,11 +535,11 @@ def match_image(image_id):
             total_matches=len(matches),
             best_score=matches[0]["confidence"] if matches else 0,
             matching_time_ms=0,
-            matched_at=datetime.utcnow()
+            matched_at=datetime.utcnow(),
         )
         db.session.add(match_history)
         db.session.flush()  # Get the match_history ID
-        
+
         # Create match detail records for ALL matches
         for rank, match in enumerate(matches, start=1):
             match_detail = MatchDetail(
@@ -533,10 +548,10 @@ def match_image(image_id):
                 sole_image_id=match["sole_image_id"],
                 similarity_score=match["confidence"],
                 rank=rank,
-                created_at=datetime.utcnow()
+                created_at=datetime.utcnow(),
             )
             db.session.add(match_detail)
-        
+
         db.session.commit()
 
         current_app.logger.info(
@@ -739,24 +754,29 @@ def list_matches():
     matches = []
     for history in pagination.items:
         uploaded_image = UploadedImage.query.get(history.uploaded_image_id)
-        
+
         # Get top match details (rank 1)
         top_match_detail = MatchDetail.query.filter_by(
-            match_history_id=history.id,
-            rank=1
+            match_history_id=history.id, rank=1
         ).first()
-        
+
         # Get all match details for this history
-        all_match_details = MatchDetail.query.filter_by(
-            match_history_id=history.id
-        ).order_by(MatchDetail.rank).all()
+        all_match_details = (
+            MatchDetail.query.filter_by(match_history_id=history.id)
+            .order_by(MatchDetail.rank)
+            .all()
+        )
 
         if top_match_detail:
             matches.append(
                 {
                     "id": history.id,
-                    "similarity_score": float(history.best_score) if history.best_score else 0.0,
-                    "matched_at": history.matched_at.isoformat() if history.matched_at else None,
+                    "similarity_score": float(history.best_score)
+                    if history.best_score
+                    else 0.0,
+                    "matched_at": history.matched_at.isoformat()
+                    if history.matched_at
+                    else None,
                     "total_matches": history.total_matches,
                     "uploaded_image_id": uploaded_image.id if uploaded_image else None,
                     "shoe": {
@@ -765,7 +785,9 @@ def list_matches():
                         "product_name": top_match_detail.sole_image.product_name,
                         "product_type": top_match_detail.sole_image.product_type,
                         "source_url": top_match_detail.sole_image.source_url,
-                        "image_url": f"/api/sole-images/{top_match_detail.sole_image.id}/image",
+                        # Provide client-consumable endpoints matching existing routes
+                        "sole_image_id": top_match_detail.sole_image.id,
+                        "image_url": f"/user/sole-image/{top_match_detail.sole_image.id}/original",
                     },
                     # Include all matches for this history session
                     "all_matches": [
@@ -779,7 +801,7 @@ def list_matches():
                             "source_url": detail.sole_image.source_url,
                         }
                         for detail in all_match_details
-                    ]
+                    ],
                 }
             )
 
@@ -792,6 +814,31 @@ def list_matches():
             "per_page": per_page,
         }
     ), 200
+
+
+@user_bp.route("/uploaded-image/<image_id>", methods=["GET"])
+@jwt_required()
+def get_uploaded_image(image_id):
+    """Return the original uploaded image as base64 for the authenticated user"""
+    user_id = get_jwt_identity()
+
+    uploaded_image = UploadedImage.query.filter_by(id=image_id, user_id=user_id).first()
+    if not uploaded_image:
+        return jsonify({"error": "Image not found"}), 404
+
+    if not os.path.exists(uploaded_image.file_path):
+        return jsonify({"error": "Image file not found"}), 404
+
+    try:
+        import base64
+
+        with open(uploaded_image.file_path, "rb") as f:
+            img_bytes = f.read()
+        img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+        return jsonify({"image": f"data:image/png;base64,{img_b64}"}), 200
+    except Exception as e:
+        current_app.logger.error(f"Error reading uploaded image {image_id}: {str(e)}")
+        return jsonify({"error": "Failed to read image"}), 500
 
 
 @user_bp.route("/delete-image/<image_id>", methods=["DELETE"])

@@ -26,6 +26,8 @@ export default function Header() {
             setProfileImageUrl(null);
         }
     }, [user?.group_id, user?.profile_image_url]); const handleLogout = () => {
+        const confirmed = typeof window !== 'undefined' ? window.confirm('Are you sure you want to log out?') : true;
+        if (!confirmed) return;
         useAuthStore.getState().logout();
         router.push('/login');
     };
