@@ -37,6 +37,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrandr2 \
     libgbm1 \
     libasound2 \
+    # Playwright browser rendering deps
+    libcairo2 \
+    libpango-1.0-0 \
+    libpangoft2-1.0-0 \
+    libfontconfig1 \
+    fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user first
