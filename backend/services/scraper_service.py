@@ -113,10 +113,10 @@ class ScraperService:
         """
         Advanced duplicate detection using multiple factors
         
-        Checks:
-        1. Exact URL match (normalized)
-        2. Brand + Product Name similarity (fuzzy match)
-        3. Image hash (if available)
+        Priority Order:
+        1. Brand + Product Name similarity (PRIMARY - fuzzy match)
+        2. Exact URL match (SECONDARY - fallback)
+        3. Image hash (future enhancement)
         
         Args:
             product: Product dict with brand, product_name, url
@@ -125,38 +125,46 @@ class ScraperService:
         Returns:
             tuple: (is_duplicate: bool, reason: str, match: SoleImage or None)
         """
-        # Check 1: Exact URL match
+        # PRIMARY CHECK: Fuzzy name + brand match
+        # This is the most reliable indicator of duplicates
+        brand = product.get("brand", "").strip()
+        product_name = product.get("product_name", "").strip()
+        
+        if brand and product_name:
+            # Get all products from same brand (limit for performance)
+            similar_products = SoleImage.query.filter(
+                SoleImage.brand.ilike(brand)
+            ).limit(1000).all()
+            
+            # Check for name similarity (90% threshold)
+            for similar in similar_products:
+                if self._fuzzy_name_match(product_name, similar.product_name, threshold=0.90):
+                    # High name similarity + same brand = likely duplicate
+                    self.logger.debug(
+                        f"🔍 PRIMARY: Fuzzy match detected: '{product_name}' ~= '{similar.product_name}' "
+                        f"(Brand: {brand}, Similarity: {SequenceMatcher(None, product_name.lower(), similar.product_name.lower()).ratio()*100:.1f}%)"
+                    )
+                    return True, "fuzzy_name_match_primary", similar
+        
+        # SECONDARY CHECK: Exact URL match (fallback)
+        # Only used if name matching didn't find a duplicate
         existing = SoleImage.query.filter_by(source_url=normalized_url).first()
         if existing:
-            return True, "exact_url", existing
+            self.logger.debug(
+                f"🔗 SECONDARY: URL match detected: {normalized_url[:80]}"
+            )
+            return True, "exact_url_secondary", existing
         
         # Also check original URL if different
         if normalized_url != product["url"]:
             existing = SoleImage.query.filter_by(source_url=product["url"]).first()
             if existing:
-                return True, "original_url", existing
+                self.logger.debug(
+                    f"🔗 SECONDARY: Original URL match detected: {product['url'][:80]}"
+                )
+                return True, "original_url_secondary", existing
         
-        # Check 2: Fuzzy name + brand match (only if brand matches exactly)
-        brand = product.get("brand", "").strip()
-        product_name = product.get("product_name", "").strip()
-        
-        if brand and product_name:
-            # Get all products from same brand
-            similar_products = SoleImage.query.filter(
-                SoleImage.brand.ilike(brand)
-            ).limit(1000).all()  # Limit to prevent performance issues
-            
-            # Check for name similarity (90% threshold for names)
-            for similar in similar_products:
-                if self._fuzzy_name_match(product_name, similar.product_name, threshold=0.90):
-                    # High name similarity + same brand = likely duplicate
-                    self.logger.debug(
-                        f"🔍 Fuzzy match detected: '{product_name}' ~= '{similar.product_name}' "
-                        f"(Brand: {brand})"
-                    )
-                    return True, "fuzzy_name_match", similar
-        
-        # Not a duplicate
+        # Not a duplicate - this is a unique product!
         return False, None, None
 
     def batch_insert_sole_images(self, products):
