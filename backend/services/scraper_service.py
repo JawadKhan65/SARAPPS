@@ -162,14 +162,10 @@ class ScraperService:
         Returns:
             tuple: (is_duplicate: bool, reason: str, match: SoleImage or None)
         """
-        # PRIMARY: Site-specific stable identifier
+        # PRIMARY: Site-specific stable identifier (will be used when stored)
         model_id = self._extract_model_id(
             product.get("url", ""), product.get("product_name", "")
         )
-        if model_id:
-            existing_by_model = SoleImage.query.filter_by(model_id=model_id).first()
-            if existing_by_model:
-                return True, "model_id_exact", existing_by_model
 
         # SECONDARY: Fuzzy name + brand match
         # This is the most reliable indicator of duplicates
@@ -214,32 +210,7 @@ class ScraperService:
                 )
                 return True, "original_url_secondary", existing
 
-        # QUATERNARY: Perceptual hash close match
-        try:
-            phash = None
-            if product.get("image_bytes"):
-                phash = self._phash_from_bytes(product["image_bytes"])
-            elif product.get("image_path") and os.path.exists(product["image_path"]):
-                with open(product["image_path"], "rb") as f:
-                    phash = self._phash_from_bytes(f.read())
-            if phash:
-                recent = (
-                    SoleImage.query.order_by(SoleImage.crawled_at.desc())
-                    .limit(200)
-                    .all()
-                )
-                for r in recent:
-                    if getattr(r, "phash", None):
-                        try:
-                            d = imagehash.hex_to_hash(phash) - imagehash.hex_to_hash(
-                                r.phash
-                            )
-                            if d <= self.phash_duplicate_distance:
-                                return True, "phash_close", r
-                        except Exception:
-                            continue
-        except Exception:
-            pass
+        # QUATERNARY: Perceptual hash close match (DB compare disabled until schema supports phash)
 
         # Not a duplicate - this is a unique product!
         return False, None, None
@@ -506,10 +477,6 @@ class ScraperService:
                     brand=product.get("brand", "Unknown").strip()[:100],
                     product_type=product.get("product_type", "Unknown").strip()[:100],
                     product_name=product.get("product_name", "").strip()[:255],
-                    model_id=self._extract_model_id(
-                        product.get("url", ""), product.get("product_name", "")
-                    )
-                    or None,
                     # File paths (legacy/fallback - optional)
                     original_image_path=original_image_ref,
                     processed_image_path=processed_path,
@@ -519,9 +486,6 @@ class ScraperService:
                     image_format=image_format,
                     # Hash and vectors
                     image_hash=image_hash,
-                    phash=self._phash_from_bytes(original_image_bytes)
-                    if original_image_bytes
-                    else None,
                     feature_vector=self.processor.serialize_features(
                         process_result["features"]
                     ),

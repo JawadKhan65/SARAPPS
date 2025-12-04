@@ -29,9 +29,7 @@ class ScraperManager:
         self.admin_id = admin_id
         self.crawler: Optional[Crawler] = None
         self.current_run: Optional[CrawlerRun] = None
-        self.batch_size = (
-            20  # Process items in batches of 20 for better uniqueness checking
-        )
+        self.batch_size = 50  # Process items in batches of 50 for better throughput
         self.uniqueness_window = 100  # Check uniqueness over last 100 items
         self.stop_requested = False
         self.scraper_service: Optional[ScraperService] = None
@@ -225,11 +223,12 @@ class ScraperManager:
                 batches_processed, total_scraped, total_unique, total_duplicates
             )
 
-            # Check uniqueness threshold
-            if not self._check_uniqueness_threshold(total_unique, total_scraped):
-                self.stop_requested = True
-                logger.warning("Uniqueness threshold not met, requesting stop")
-                return False  # Stop scraping
+            # Report per-batch uniqueness percentage (diagnostic only)
+            if len(batch) > 0:
+                batch_uniqueness_pct = (result["unique"] / len(batch)) * 100
+                logger.info(
+                    f"Batch {batches_processed} uniqueness: {batch_uniqueness_pct:.1f}%"
+                )
 
             # Check for cancel request
             if self._check_cancel_requested():
@@ -311,13 +310,7 @@ class ScraperManager:
                         batches_processed, total_scraped, total_unique, total_duplicates
                     )
 
-                    # Check uniqueness threshold
-                    if not self._check_uniqueness_threshold(
-                        total_unique, total_scraped
-                    ):
-                        logger.warning("Uniqueness threshold not met, stopping scraper")
-                        self.stop_requested = True
-                        break
+                    # Do not stop on global uniqueness threshold; continue processing
 
         return {
             "total_scraped": total_scraped,
@@ -468,23 +461,23 @@ class ScraperManager:
 
     def _check_uniqueness_threshold(self, unique: int, total: int) -> bool:
         """Check if uniqueness is above threshold with smart minimum thresholds"""
-        
+
         # Minimum items to scrape before considering stopping based on uniqueness
         # Large e-commerce sites should scrape more before stopping
         MIN_ITEMS_THRESHOLDS = {
-            'Zalando': 1000,   # Large catalog
-            'Amazon': 1000,    # Large catalog
-            'Nike': 500,
-            'Adidas': 500,
+            "Zalando": 1000,  # Large catalog
+            "Amazon": 1000,  # Large catalog
+            "Nike": 500,
+            "Adidas": 500,
         }
-        
+
         # Get minimum threshold for this crawler (default 200)
         min_items = 200
         for name_pattern, threshold in MIN_ITEMS_THRESHOLDS.items():
             if name_pattern.lower() in self.crawler.name.lower():
                 min_items = threshold
                 break
-        
+
         # Don't stop until minimum items threshold reached
         if total < min_items:
             logger.debug(
@@ -492,7 +485,7 @@ class ScraperManager:
                 f"(waiting for minimum threshold)"
             )
             return True
-        
+
         # Also need minimum samples for statistical validity
         if total < 50:
             return True
@@ -516,7 +509,9 @@ class ScraperManager:
                     f"Auto-stopped: Uniqueness {uniqueness:.1f}% below threshold "
                     f"{self.crawler.min_uniqueness_threshold}% after {total} items"
                 )
-                logger.info(f"🛑 Stopping crawler after {total} items due to low uniqueness")
+                logger.info(
+                    f"🛑 Stopping crawler after {total} items due to low uniqueness"
+                )
                 return False
             else:
                 logger.info(
