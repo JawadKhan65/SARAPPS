@@ -52,6 +52,27 @@ class Config:
     # Image processing
     SIMILARITY_THRESHOLD = 0.85  # Stop scraping if uniqueness < 85%
     BATCH_SIZE = 50  # Process images in batches of 50
+    
+    # Scraper Configuration
+    # Minimum items to scrape before considering stopping based on uniqueness
+    # Large e-commerce sites should scrape more before stopping
+    CRAWLER_MIN_ITEMS_THRESHOLDS = {
+        'Zalando': 1000,   # Large catalog, expect ~10k+ items
+        'Amazon': 1000,    # Large catalog
+        'Nike': 500,       # Mid-size catalog
+        'Adidas': 500,     # Mid-size catalog  
+        'Default': 200,    # Default for other crawlers
+    }
+    
+    # Uniqueness thresholds per crawler (percentage)
+    CRAWLER_UNIQUENESS_THRESHOLDS = {
+        'Zalando': 15.0,   # Can be lower due to large catalog
+        'Amazon': 15.0,    # Can be lower due to large catalog
+        'Default': 30.0,   # Default threshold
+    }
+    
+    # Fuzzy name matching threshold (0-1)
+    FUZZY_NAME_MATCH_THRESHOLD = 0.90  # 90% similarity for duplicate names
 
     # CORS
     CORS_ORIGINS = os.getenv(

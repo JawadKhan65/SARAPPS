@@ -467,8 +467,34 @@ class ScraperManager:
         )
 
     def _check_uniqueness_threshold(self, unique: int, total: int) -> bool:
-        """Check if uniqueness is above threshold"""
-        if total < 50:  # Need minimum samples
+        """Check if uniqueness is above threshold with smart minimum thresholds"""
+        
+        # Minimum items to scrape before considering stopping based on uniqueness
+        # Large e-commerce sites should scrape more before stopping
+        MIN_ITEMS_THRESHOLDS = {
+            'Zalando': 1000,   # Large catalog
+            'Amazon': 1000,    # Large catalog
+            'Nike': 500,
+            'Adidas': 500,
+        }
+        
+        # Get minimum threshold for this crawler (default 200)
+        min_items = 200
+        for name_pattern, threshold in MIN_ITEMS_THRESHOLDS.items():
+            if name_pattern.lower() in self.crawler.name.lower():
+                min_items = threshold
+                break
+        
+        # Don't stop until minimum items threshold reached
+        if total < min_items:
+            logger.debug(
+                f"Continuing scrape: {total}/{min_items} items "
+                f"(waiting for minimum threshold)"
+            )
+            return True
+        
+        # Also need minimum samples for statistical validity
+        if total < 50:
             return True
 
         uniqueness = (unique / total) * 100
@@ -476,20 +502,26 @@ class ScraperManager:
         if uniqueness < self.crawler.min_uniqueness_threshold:
             logger.warning(
                 f"⚠️  Uniqueness below threshold: {uniqueness:.1f}% < "
-                f"{self.crawler.min_uniqueness_threshold}%"
+                f"{self.crawler.min_uniqueness_threshold}% "
+                f"(Scraped: {total}, Unique: {unique})"
             )
 
             if self.crawler.notify_admin_on_low_uniqueness:
                 self._notify_admin_low_uniqueness(uniqueness)
 
-            # Auto-stop if configured
-            if self.crawler.notify_admin_on_low_uniqueness:
+            # Only auto-stop after minimum threshold AND if configured
+            if self.crawler.notify_admin_on_low_uniqueness and total >= min_items:
                 self.current_run.auto_stopped_low_uniqueness = True
                 self.current_run.cancelled_reason = (
                     f"Auto-stopped: Uniqueness {uniqueness:.1f}% below threshold "
-                    f"{self.crawler.min_uniqueness_threshold}%"
+                    f"{self.crawler.min_uniqueness_threshold}% after {total} items"
                 )
+                logger.info(f"🛑 Stopping crawler after {total} items due to low uniqueness")
                 return False
+            else:
+                logger.info(
+                    f"⚠️  Low uniqueness but continuing (min threshold: {min_items})"
+                )
 
         return True
 

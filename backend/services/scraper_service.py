@@ -9,6 +9,7 @@ from core.models import SoleImage, Crawler, CrawlerStatistics
 from services.image_processor import ImageProcessor
 import hashlib
 import numpy as np
+from difflib import SequenceMatcher
 
 # Add line_tracing module to path
 line_tracing_path = os.path.join(os.path.dirname(__file__), "..", "line_tracing_utils")
@@ -79,6 +80,84 @@ class ScraperService:
         )
 
         return normalized
+    
+    def _fuzzy_name_match(self, name1, name2, threshold=0.85):
+        """
+        Check if two product names are similar using fuzzy matching
+        
+        Args:
+            name1: First product name
+            name2: Second product name
+            threshold: Similarity threshold (0-1), default 0.85 (85%)
+            
+        Returns:
+            bool: True if names are similar above threshold
+        """
+        if not name1 or not name2:
+            return False
+        
+        # Normalize names (lowercase, strip whitespace)
+        n1 = name1.lower().strip()
+        n2 = name2.lower().strip()
+        
+        # Exact match
+        if n1 == n2:
+            return True
+        
+        # Calculate similarity ratio
+        similarity = SequenceMatcher(None, n1, n2).ratio()
+        
+        return similarity >= threshold
+    
+    def _check_duplicate_advanced(self, product, normalized_url):
+        """
+        Advanced duplicate detection using multiple factors
+        
+        Checks:
+        1. Exact URL match (normalized)
+        2. Brand + Product Name similarity (fuzzy match)
+        3. Image hash (if available)
+        
+        Args:
+            product: Product dict with brand, product_name, url
+            normalized_url: Normalized product URL
+            
+        Returns:
+            tuple: (is_duplicate: bool, reason: str, match: SoleImage or None)
+        """
+        # Check 1: Exact URL match
+        existing = SoleImage.query.filter_by(source_url=normalized_url).first()
+        if existing:
+            return True, "exact_url", existing
+        
+        # Also check original URL if different
+        if normalized_url != product["url"]:
+            existing = SoleImage.query.filter_by(source_url=product["url"]).first()
+            if existing:
+                return True, "original_url", existing
+        
+        # Check 2: Fuzzy name + brand match (only if brand matches exactly)
+        brand = product.get("brand", "").strip()
+        product_name = product.get("product_name", "").strip()
+        
+        if brand and product_name:
+            # Get all products from same brand
+            similar_products = SoleImage.query.filter(
+                SoleImage.brand.ilike(brand)
+            ).limit(1000).all()  # Limit to prevent performance issues
+            
+            # Check for name similarity (90% threshold for names)
+            for similar in similar_products:
+                if self._fuzzy_name_match(product_name, similar.product_name, threshold=0.90):
+                    # High name similarity + same brand = likely duplicate
+                    self.logger.debug(
+                        f"🔍 Fuzzy match detected: '{product_name}' ~= '{similar.product_name}' "
+                        f"(Brand: {brand})"
+                    )
+                    return True, "fuzzy_name_match", similar
+        
+        # Not a duplicate
+        return False, None, None
 
     def batch_insert_sole_images(self, products):
         """
@@ -139,21 +218,18 @@ class ScraperService:
                 # Normalize URL for consistent duplicate detection
                 normalized_url = self.normalize_url(product["url"])
 
-                # Check if normalized URL already exists in database
-                existing = SoleImage.query.filter_by(source_url=normalized_url).first()
+                # Advanced duplicate detection with multiple factors
+                is_duplicate, dup_reason, existing = self._check_duplicate_advanced(
+                    product, normalized_url
+                )
 
-                # Also check original URL if different from normalized
-                if not existing and normalized_url != product["url"]:
-                    existing = SoleImage.query.filter_by(
-                        source_url=product["url"]
-                    ).first()
-
-                if existing:
+                if is_duplicate:
                     result["duplicates"] += 1
                     self.logger.info(
-                        f"🔄 Duplicate product link detected: {product['url'][:80]}... "
+                        f"🔄 Duplicate detected ({dup_reason}): {product['url'][:80]}... "
                         f"(Brand: {product.get('brand', 'Unknown')}, "
-                        f"Name: {product.get('product_name', 'Unknown')[:40]})"
+                        f"Name: {product.get('product_name', 'Unknown')[:40]}) "
+                        f"→ matches: {existing.source_url[:60] if existing else 'N/A'}..."
                     )
                     continue
 
