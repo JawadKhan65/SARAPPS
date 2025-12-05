@@ -559,11 +559,20 @@ class ZalandoScraper(BatchProcessingMixin):
                     page_url = f"{self.base_url}?p={page_num}"
                     for attempt in range(MAX_RETRIES):
                         try:
-                            await page.goto(
+                            response = await page.goto(
                                 page_url,
                                 wait_until="domcontentloaded",
                                 timeout=NAVIGATION_TIMEOUT,
                             )
+                            try:
+                                if response and response.status == 403:
+                                    logger.warning(
+                                        f"HTTP 403 for GET {page_url} — backing off"
+                                    )
+                                    await asyncio.sleep(RETRY_DELAY * (attempt + 1))
+                                    raise Exception("403 Forbidden")
+                            except Exception:
+                                pass
 
                             try:
                                 consent_btn = page.locator(consent_button_selector)
@@ -754,13 +763,15 @@ async def get_product_links(page: Page) -> List[str]:
     Finds all <a> tags with href containing product URLs inside the products container.
     """
     try:
-        # Wait for products container to be visible (use locator-based wait to respect XPath)
-        await page.locator(PRODUCTS_CONTAINER_XPATH).first.wait_for(timeout=12000)
-
-        # Get all product links
-        links = await page.locator(
-            f'{PRODUCTS_CONTAINER_XPATH}//a[contains(@href, ".html")]'
-        ).all()
+        # Try XPath container first, then fallback to CSS in main-content
+        try:
+            await page.locator(PRODUCTS_CONTAINER_XPATH).first.wait_for(timeout=8000)
+            links = await page.locator(
+                f'{PRODUCTS_CONTAINER_XPATH}//a[contains(@href, ".html")]'
+            ).all()
+        except Exception:
+            await page.locator("#main-content").first.wait_for(timeout=8000)
+            links = await page.locator('#main-content a[href*=".html"]').all()
         product_links = []
 
         for link in links:
