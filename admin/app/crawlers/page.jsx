@@ -22,6 +22,7 @@ export default function CrawlersPage() {
     const [jobStatuses, setJobStatuses] = useState({});
     const [workerHealth, setWorkerHealth] = useState(null);
     const [startingCrawlers, setStartingCrawlers] = useState(new Set());
+    const [zeroStreaks, setZeroStreaks] = useState({});
 
     // Check authentication in useEffect to avoid rendering errors
     useEffect(() => {
@@ -54,7 +55,19 @@ export default function CrawlersPage() {
     const loadCrawlers = async () => {
         try {
             const response = await adminAPI.listCrawlers();
-            setCrawlers(response.data.crawlers || []);
+            const list = response.data.crawlers || [];
+            setCrawlers(list);
+
+            // Update consecutive 0% uniqueness streaks client-side
+            setZeroStreaks((prev) => {
+                const next = { ...prev };
+                for (const c of list) {
+                    const upct = Number(c.uniqueness_percentage || 0);
+                    const curr = next[c.id] || 0;
+                    next[c.id] = c.is_running ? (upct === 0 ? curr + 1 : 0) : 0;
+                }
+                return next;
+            });
         } catch (err) {
             console.error('Failed to load crawlers:', err);
             setError('Failed to load crawlers');
@@ -295,6 +308,7 @@ export default function CrawlersPage() {
                                 getStatusColor={getStatusColor}
                                 getStatusIcon={getStatusIcon}
                                 getStatusText={getStatusText}
+                                zeroStreak={zeroStreaks[crawler.id] || 0}
                             />
                         ))}
                     </div>
@@ -378,7 +392,7 @@ export default function CrawlersPage() {
                                     className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                                 />
                                 <p className="text-xs text-gray-500 mt-1">
-                                    Auto-stop crawler if uniqueness drops below this percentage
+                                    Used for monitoring only; the scraper will not auto-stop.
                                 </p>
                             </div>
 
@@ -439,7 +453,7 @@ function StatCard({ icon, label, value, color }) {
     );
 }
 
-function CrawlerCard({ crawler, jobStatus, isStarting, expanded, onToggleExpand, onStart, onStop, onSettings, getStatusColor, getStatusIcon, getStatusText }) {
+function CrawlerCard({ crawler, jobStatus, isStarting, expanded, onToggleExpand, onStart, onStop, onSettings, getStatusColor, getStatusIcon, getStatusText, zeroStreak }) {
     // Get real-time progress from job status
     const progress = jobStatus?.progress;
     const heartbeat = jobStatus?.heartbeat;
@@ -467,6 +481,12 @@ function CrawlerCard({ crawler, jobStatus, isStarting, expanded, onToggleExpand,
                                 {getStatusIcon(crawler)}
                                 {getStatusText(crawler)}
                             </span>
+                            {crawler.is_running && crawler.uniqueness_percentage === 0 && (
+                                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-sm font-medium text-red-700 bg-red-50 border border-red-200">
+                                    <AlertCircle className="w-4 h-4" />
+                                    0% uniqueness ({zeroStreak})
+                                </span>
+                            )}
                             {isStalled && (
                                 <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-sm font-medium text-amber-600 bg-amber-50 border border-amber-200">
                                     <AlertCircle className="w-4 h-4" />
@@ -513,7 +533,7 @@ function CrawlerCard({ crawler, jobStatus, isStarting, expanded, onToggleExpand,
                                 <button
                                     onClick={onStop}
                                     disabled={isStarting}
-                                    className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors shadow-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                                    className="flex items-center gap-3 px-5 py-3 bg-red-600 text-white rounded-xl hover:bg-red-700 transition-colors shadow-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.99] focus:outline-none focus:ring-2 focus:ring-red-400"
                                 >
                                     <Pause className="w-4 h-4" />
                                     Cancel
@@ -523,7 +543,7 @@ function CrawlerCard({ crawler, jobStatus, isStarting, expanded, onToggleExpand,
                             <button
                                 onClick={onStart}
                                 disabled={!crawler.is_active || isStarting}
-                                className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors shadow-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                                className="flex items-center gap-3 px-5 py-3 bg-green-600 text-white rounded-xl hover:bg-green-700 transition-colors shadow-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.99] focus:outline-none focus:ring-2 focus:ring-green-400"
                             >
                                 {isStarting ? (
                                     <>
@@ -532,7 +552,7 @@ function CrawlerCard({ crawler, jobStatus, isStarting, expanded, onToggleExpand,
                                     </>
                                 ) : (
                                     <>
-                                        <Play className="w-4 h-4" />
+                                        <Play className="w-5 h-5" />
                                         Start
                                     </>
                                 )}
@@ -540,9 +560,9 @@ function CrawlerCard({ crawler, jobStatus, isStarting, expanded, onToggleExpand,
                         )}
                         <button
                             onClick={onSettings}
-                            className="p-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+                            className="p-3 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-xl transition-colors"
                         >
-                            <Settings className="w-5 h-5" />
+                            <Settings className="w-6 h-6" />
                         </button>
                     </div>
                 </div>
