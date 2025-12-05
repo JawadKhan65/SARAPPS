@@ -214,12 +214,12 @@ export default function CrawlersPage() {
                                 Data Crawlers
                                 {workerHealth && (
                                     <span className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-sm font-medium ${workerHealth.healthy && workerHealth.workers > 0
-                                            ? 'text-green-700 bg-green-50 border border-green-200'
-                                            : 'text-red-700 bg-red-50 border border-red-200'
+                                        ? 'text-green-700 bg-green-50 border border-green-200'
+                                        : 'text-red-700 bg-red-50 border border-red-200'
                                         }`}>
                                         <span className={`w-2 h-2 rounded-full ${workerHealth.healthy && workerHealth.workers > 0
-                                                ? 'bg-green-500 animate-pulse'
-                                                : 'bg-red-500'
+                                            ? 'bg-green-500 animate-pulse'
+                                            : 'bg-red-500'
                                             }`}></span>
                                         {workerHealth.workers || 0} Worker{workerHealth.workers !== 1 ? 's' : ''}
                                     </span>
@@ -644,8 +644,8 @@ function CrawlerCard({ crawler, jobStatus, isStarting, expanded, onToggleExpand,
                                 <div className="flex flex-col">
                                     <span className="text-gray-500 uppercase tracking-wide">Uniqueness</span>
                                     <span className={`font-semibold text-sm mt-0.5 ${crawler.uniqueness_percentage > 70 ? 'text-green-600' :
-                                            crawler.uniqueness_percentage > 40 ? 'text-yellow-600' :
-                                                'text-red-600'
+                                        crawler.uniqueness_percentage > 40 ? 'text-yellow-600' :
+                                            'text-red-600'
                                         }`}>
                                         {crawler.uniqueness_percentage.toFixed(1)}%
                                     </span>
