@@ -331,8 +331,10 @@ class ScraperManager:
                 # Normalize field names from different scrapers
                 normalized = self._normalize_scraper_item(item)
 
-                # Download image
-                image_path = await self._download_image(normalized["image_url"], idx)
+                # Download image (send Referer to satisfy CDN protections)
+                image_path = await self._download_image(
+                    normalized["image_url"], idx, referer=normalized.get("url")
+                )
                 if not image_path:
                     logger.warning(f"Failed to download image for {normalized['url']}")
                     continue
@@ -401,7 +403,9 @@ class ScraperManager:
             "image_url": image_url,
         }
 
-    async def _download_image(self, image_url: str, idx: int) -> Optional[str]:
+    async def _download_image(
+        self, image_url: str, idx: int, referer: Optional[str] = None
+    ) -> Optional[str]:
         """Download image from URL and return local path"""
         if not image_url:
             return None
@@ -414,15 +418,36 @@ class ScraperManager:
             filename = f"item_{idx}_{hash(image_url)}.{ext}"
             filepath = self.temp_image_dir / filename
 
-            # Download image
-            response = requests.get(
-                image_url,
-                timeout=30,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                },
-            )
-            response.raise_for_status()
+            # Prepare headers (include Referer to avoid CDN blocks)
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            }
+            if referer:
+                headers["Referer"] = referer
+
+            # Download with simple retry/backoff to mitigate transient ERR_FAILED/403
+            attempts = 3
+            backoff_sec = 1.0
+            for attempt in range(1, attempts + 1):
+                try:
+                    response = requests.get(
+                        image_url,
+                        timeout=30,
+                        headers=headers,
+                    )
+                    response.raise_for_status()
+                    break
+                except Exception as e:
+                    if attempt < attempts:
+                        logger.warning(
+                            f"Image request failed (attempt {attempt}): {e}; retrying in {backoff_sec}s"
+                        )
+                        import time
+
+                        time.sleep(backoff_sec)
+                        backoff_sec *= 2
+                    else:
+                        raise
 
             # Save to disk
             with open(filepath, "wb") as f:
