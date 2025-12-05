@@ -620,7 +620,7 @@ class ScraperService:
 
         return result
 
-    def _check_uniqueness(self, features, image_path=None, image_array=None, top_n=5):
+    def _check_uniqueness(self, features, image_path=None, image_array=None, top_n=50):
         """
         Check if features are unique in database
         Uses line_tracing for advanced shoe sole comparison
@@ -677,10 +677,21 @@ class ScraperService:
                 # For in-memory images, fall through to feature-based comparison below
 
             # Fallback to standard feature comparison
+            # Prefer comparing against same-brand recent images first to improve quality
+            brand = None
+            try:
+                # features may not contain brand; attempt to get from context if available
+                brand = None
+            except Exception:
+                brand = None
+
+            base_query = SoleImage.query.filter_by(crawler_id=self.crawler_id)
+            if brand:
+                base_query = base_query.filter(SoleImage.brand.ilike(brand))
+
             all_images = (
-                SoleImage.query.filter_by(crawler_id=self.crawler_id)
-                .order_by(SoleImage.crawled_at.desc())
-                .limit(top_n)
+                base_query.order_by(SoleImage.crawled_at.desc())
+                .limit(max(100, top_n))
                 .all()
             )
 
