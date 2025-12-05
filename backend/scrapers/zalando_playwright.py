@@ -198,11 +198,49 @@ async def launch_browser_context(playwright, headless: bool = True):
     except Exception:
         pass
 
-    # Route: only block heavy media; leave scripts alone
+    # Route: block trackers/ads/metrics; allow product images/fonts to reduce ERR noise
+    BLOCK_HOSTS = [
+        "googleads.g.doubleclick.net",
+        "ad.doubleclick.net",
+        "www.google.com",
+        "www.google.nl",
+        "www.googletagmanager.com",
+        "o4509038451032064.ingest.de.sentry.io",
+        "app.eu.usercentrics.eu",
+        "www.zalando.nl/api/cmag",
+        "www.zalando.nl/api/otlp",
+        "www.zalando.nl/api/t",
+        "www.zalando.nl/api/otlp/metrics",
+        "www.zalando.nl/api/otlp/trace",
+    ]
+
+    ALLOW_IMAGE_HOSTS = [
+        ".ztat.net",
+        "cloudfront.net",
+    ]
+
     async def _route_handler(route):
         req = route.request
-        if req.resource_type in ("image", "media", "font"):
+        url = req.url
+        host = ""
+        try:
+            from urllib.parse import urlparse
+
+            host = urlparse(url).netloc
+        except Exception:
+            pass
+
+        # Block noisy telemetry/ads
+        if any(h in host for h in BLOCK_HOSTS):
             return await route.abort()
+
+        # Allow product media from known CDN hosts; otherwise continue
+        if req.resource_type in ("image", "font", "media"):
+            if any(h in host for h in ALLOW_IMAGE_HOSTS):
+                return await route.continue_()
+            # For other image hosts, still allow; blocking causes ERR_FAILED spam
+            return await route.continue_()
+
         return await route.continue_()
 
     try:
@@ -404,6 +442,22 @@ class ZalandoScraper(BatchProcessingMixin):
 
             def _handle_request_failed(request):
                 try:
+                    # Suppress logging for intentionally blocked tracker/ads
+                    from urllib.parse import urlparse
+
+                    host = urlparse(request.url).netloc
+                    suppress_hosts = {
+                        "googleads.g.doubleclick.net",
+                        "ad.doubleclick.net",
+                        "www.googletagmanager.com",
+                        "www.google.com",
+                        "www.google.nl",
+                        "o4509038451032064.ingest.de.sentry.io",
+                        "app.eu.usercentrics.eu",
+                    }
+                    if host in suppress_hosts:
+                        return
+
                     failure = request.failure
                     logger.warning(
                         f"Request failed: {request.method} {request.url} -> {failure}"
