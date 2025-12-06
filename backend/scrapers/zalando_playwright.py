@@ -458,9 +458,9 @@ async def launch_browser_context(
 
     async def _route_handler(route):
         req = route.request
-        if req.resource_type in ("image", "media", "font"):
-            url = req.url
-            host = ""
+        url = req.url
+        host = ""
+
         try:
             from urllib.parse import urlparse
 
