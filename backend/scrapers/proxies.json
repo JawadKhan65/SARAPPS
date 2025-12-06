@@ -1,0 +1,74 @@
+{
+  "proxies": [
+    {
+      "host": "gate.decodo.com",
+      "port": 10001,
+      "username": "spg27o7rlx",
+      "password": "~zA4wHts7JfgtSq1g1",
+      "protocol": "http"
+    },
+    {
+      "host": "gate.decodo.com",
+      "port": 10002,
+      "username": "spg27o7rlx",
+      "password": "~zA4wHts7JfgtSq1g1",
+      "protocol": "http"
+    },
+    {
+      "host": "gate.decodo.com",
+      "port": 10003,
+      "username": "spg27o7rlx",
+      "password": "~zA4wHts7JfgtSq1g1",
+      "protocol": "http"
+    },
+    {
+      "host": "gate.decodo.com",
+      "port": 10004,
+      "username": "spg27o7rlx",
+      "password": "~zA4wHts7JfgtSq1g1",
+      "protocol": "http"
+    },
+    {
+      "host": "gate.decodo.com",
+      "port": 10005,
+      "username": "spg27o7rlx",
+      "password": "~zA4wHts7JfgtSq1g1",
+      "protocol": "http"
+    },
+    {
+      "host": "gate.decodo.com",
+      "port": 10006,
+      "username": "spg27o7rlx",
+      "password": "~zA4wHts7JfgtSq1g1",
+      "protocol": "http"
+    },
+    {
+      "host": "gate.decodo.com",
+      "port": 10007,
+      "username": "spg27o7rlx",
+      "password": "~zA4wHts7JfgtSq1g1",
+      "protocol": "http"
+    },
+    {
+      "host": "gate.decodo.com",
+      "port": 10008,
+      "username": "spg27o7rlx",
+      "password": "~zA4wHts7JfgtSq1g1",
+      "protocol": "http"
+    },
+    {
+      "host": "gate.decodo.com",
+      "port": 10009,
+      "username": "spg27o7rlx",
+      "password": "~zA4wHts7JfgtSq1g1",
+      "protocol": "http"
+    },
+    {
+      "host": "gate.decodo.com",
+      "port": 10010,
+      "username": "spg27o7rlx",
+      "password": "~zA4wHts7JfgtSq1g1",
+      "protocol": "http"
+    }
+  ]
+}

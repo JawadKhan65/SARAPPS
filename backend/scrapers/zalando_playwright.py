@@ -13,12 +13,17 @@ Returns a list of dictionaries with product metadata.
 import asyncio
 import json
 import re
+import random
+import time
 from pathlib import Path
 from io import BytesIO
 from typing import List, Dict, Any, Optional
 from PIL import Image
 import requests
 from playwright.async_api import async_playwright, Page
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 
 # get_chromium_launch_config no longer used with custom launch args
 import logging
@@ -32,20 +37,222 @@ from scrapers.base_scraper_mixin import BatchProcessingMixin
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# CRITICAL FIX: Reduce timeouts to prevent hanging (Fix #8)
-DEFAULT_TIMEOUT = 10000  # 10 seconds for faster blocked URL detection
-NAVIGATION_TIMEOUT = 10000  # 10 seconds for faster blocked URL detection
-MAX_RETRIES = 2  # Max 2 retries per URL (Fix #1)
+# Increase timeouts and add retry settings
+DEFAULT_TIMEOUT = 60000  # 60 seconds
+NAVIGATION_TIMEOUT = 90000  # 90 seconds for page navigation
+MAX_RETRIES = 3
 RETRY_DELAY = 3  # seconds between retries
+
+# Scraping delays to appear human-like
+MIN_PRODUCT_DELAY = 3  # minimum seconds between products
+MAX_PRODUCT_DELAY = 8  # maximum seconds between products
+MIN_PAGE_DELAY = 10  # minimum seconds between pages
+MAX_PAGE_DELAY = 20  # maximum seconds between pages
+BACKOFF_MULTIPLIER = 2  # exponential backoff multiplier on failures
 MAIN_CONTENT_SELECTOR = "#main-content"
 CONSENT_BUTTON_SELECTOR = '[data-testid="uc-accept-all-button"]'
 COOKIE_IFRAME_PREFIX = "sp_message_iframe"
 COOKIE_BUTTON_TEXTS = ["OK", "Akkoord", "Alles toestaan", "Alle cookies accepteren"]
 STORAGE_STATE_PATH = Path(__file__).parent / ".storage" / "zalando_storage.json"
+PROXY_CONFIG_PATH = Path(__file__).parent / "proxies.json"
 
-# Enhanced stealth initialization script (Fix #9: Enhanced stealth mode)
+
+@dataclass
+class ProxyInfo:
+    """Data class for tracking proxy statistics and health."""
+
+    host: str
+    port: int
+    username: Optional[str] = None
+    password: Optional[str] = None
+    protocol: str = "http"  # http or socks5
+
+    # Statistics
+    success_count: int = 0
+    failure_count: int = 0
+    last_used: Optional[datetime] = None
+    last_failure: Optional[datetime] = None
+    consecutive_failures: int = 0
+    is_active: bool = True
+    avg_response_time: float = 0.0
+
+    def __post_init__(self):
+        """Validate proxy configuration."""
+        if not self.host or not self.port:
+            raise ValueError("Proxy host and port are required")
+
+    @property
+    def url(self) -> str:
+        """Get proxy URL string."""
+        if self.username and self.password:
+            return f"{self.protocol}://{self.username}:{self.password}@{self.host}:{self.port}"
+        return f"{self.protocol}://{self.host}:{self.port}"
+
+    @property
+    def server_url(self) -> str:
+        """Get proxy server URL for Playwright."""
+        return f"{self.protocol}://{self.host}:{self.port}"
+
+    @property
+    def success_rate(self) -> float:
+        """Calculate success rate."""
+        total = self.success_count + self.failure_count
+        return self.success_count / total if total > 0 else 0.0
+
+    def record_success(self, response_time: float = 0.0):
+        """Record successful request."""
+        self.success_count += 1
+        self.consecutive_failures = 0
+        self.last_used = datetime.now()
+        if response_time > 0:
+            # Running average of response time
+            if self.avg_response_time == 0:
+                self.avg_response_time = response_time
+            else:
+                self.avg_response_time = (self.avg_response_time * 0.7) + (
+                    response_time * 0.3
+                )
+
+    def record_failure(self):
+        """Record failed request."""
+        self.failure_count += 1
+        self.consecutive_failures += 1
+        self.last_failure = datetime.now()
+
+        # Deactivate proxy after too many consecutive failures
+        if self.consecutive_failures >= 5:
+            self.is_active = False
+            logger.warning(
+                f"Proxy {self.host}:{self.port} deactivated after {self.consecutive_failures} consecutive failures"
+            )
+
+    def should_rest(self, rest_period: int = 300) -> bool:
+        """Check if proxy should rest after recent failure."""
+        if not self.last_failure:
+            return False
+        return (datetime.now() - self.last_failure).total_seconds() < rest_period
+
+
+class ProxyManager:
+    """Manages proxy rotation with health tracking and automatic failover."""
+
+    def __init__(
+        self, proxy_list: List[Dict[str, Any]] = None, enable_rotation: bool = True
+    ):
+        """
+        Initialize proxy manager.
+
+        Args:
+            proxy_list: List of proxy configurations
+            enable_rotation: Enable proxy rotation (False = no proxy)
+        """
+        self.enable_rotation = enable_rotation
+        self.proxies: List[ProxyInfo] = []
+        self.current_index = 0
+        self.rotation_count = 0
+
+        if enable_rotation and proxy_list:
+            self._load_proxies(proxy_list)
+        elif enable_rotation and PROXY_CONFIG_PATH.exists():
+            self._load_from_file()
+
+        if self.enable_rotation and not self.proxies:
+            logger.warning("Proxy rotation enabled but no proxies configured")
+            self.enable_rotation = False
+
+    def _load_proxies(self, proxy_list: List[Dict[str, Any]]):
+        """Load proxies from list."""
+        for proxy_config in proxy_list:
+            try:
+                proxy = ProxyInfo(
+                    host=proxy_config["host"],
+                    port=proxy_config["port"],
+                    username=proxy_config.get("username"),
+                    password=proxy_config.get("password"),
+                    protocol=proxy_config.get("protocol", "http"),
+                )
+                self.proxies.append(proxy)
+                logger.info(f"Loaded proxy: {proxy.host}:{proxy.port}")
+            except Exception as e:
+                logger.error(f"Failed to load proxy {proxy_config}: {e}")
+
+    def _load_from_file(self):
+        """Load proxies from JSON configuration file."""
+        try:
+            with open(PROXY_CONFIG_PATH, "r") as f:
+                config = json.load(f)
+                proxy_list = config.get("proxies", [])
+                self._load_proxies(proxy_list)
+                logger.info(
+                    f"Loaded {len(self.proxies)} proxies from {PROXY_CONFIG_PATH}"
+                )
+        except Exception as e:
+            logger.error(f"Failed to load proxies from file: {e}")
+
+    def get_active_proxies(self) -> List[ProxyInfo]:
+        """Get list of currently active proxies."""
+        return [p for p in self.proxies if p.is_active and not p.should_rest()]
+
+    def get_next_proxy(self) -> Optional[ProxyInfo]:
+        """Get next proxy in rotation."""
+        if not self.enable_rotation or not self.proxies:
+            return None
+
+        active_proxies = self.get_active_proxies()
+        if not active_proxies:
+            logger.error("No active proxies available")
+            return None
+
+        # Sort by success rate and response time
+        active_proxies.sort(
+            key=lambda p: (p.success_rate, -p.avg_response_time), reverse=True
+        )
+
+        # Use round-robin among top proxies
+        proxy = active_proxies[self.current_index % len(active_proxies)]
+        self.current_index = (self.current_index + 1) % len(active_proxies)
+        self.rotation_count += 1
+
+        logger.debug(
+            f"Selected proxy {proxy.host}:{proxy.port} (success rate: {proxy.success_rate:.2%})"
+        )
+        return proxy
+
+    def rotate_on_failure(self, failed_proxy: ProxyInfo) -> Optional[ProxyInfo]:
+        """Rotate to next proxy after failure."""
+        if failed_proxy:
+            failed_proxy.record_failure()
+
+        # Force rotation to a different proxy
+        next_proxy = self.get_next_proxy()
+        if next_proxy and next_proxy.host == failed_proxy.host:
+            # Try to get a different one
+            next_proxy = self.get_next_proxy()
+
+        return next_proxy
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get proxy statistics."""
+        active_count = len(self.get_active_proxies())
+        total_success = sum(p.success_count for p in self.proxies)
+        total_failure = sum(p.failure_count for p in self.proxies)
+
+        return {
+            "total_proxies": len(self.proxies),
+            "active_proxies": active_count,
+            "total_requests": total_success + total_failure,
+            "total_success": total_success,
+            "total_failures": total_failure,
+            "overall_success_rate": total_success / (total_success + total_failure)
+            if (total_success + total_failure) > 0
+            else 0,
+            "rotation_count": self.rotation_count,
+        }
+
+
+# Enhanced stealth initialization script
 STEALTH_INIT_SCRIPT = """
-// CRITICAL: Remove webdriver property (Fix #9)
+// Remove webdriver property
 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 
 // Add chrome object with more realistic properties
@@ -151,12 +358,22 @@ BASE_CONTEXT_OPTIONS = {
 }
 
 
-async def launch_browser_context(playwright, headless: bool = True):
+async def launch_browser_context(
+    playwright, headless: bool = True, proxy: Optional[ProxyInfo] = None
+):
     """
-    Launch Chromium with anti-detection flags (AutomationControlled disabled).
+    Launch Chromium with anti-detection flags and optional proxy support.
+
+    Args:
+        playwright: Playwright instance
+        headless: Run in headless mode
+        proxy: Optional ProxyInfo for request routing
+
+    Returns:
+        Tuple of (browser, context, page)
     """
 
-    # Anti-detection args - MORE aggressive stealth
+    # Anti-detection args
     args = [
         "--disable-blink-features=AutomationControlled",
         "--no-sandbox",
@@ -173,24 +390,43 @@ async def launch_browser_context(playwright, headless: bool = True):
     if headless:
         args.append("--headless=new")
 
+    # Add proxy args if provided
+    if proxy:
+        args.append(f"--proxy-server={proxy.server_url}")
+        logger.info(f"🌐 Using proxy: {proxy.host}:{proxy.port}")
+
     launch_config = {
-        "headless": True,
+        "headless": False if headless else False,
         "args": args,
         "ignore_default_args": ["--enable-automation"],
     }
 
     browser = await playwright.chromium.launch(**launch_config)
+
     # Load persisted storage (cookies) if available to bypass consent
     context_options = BASE_CONTEXT_OPTIONS.copy()
-    # Use more recent Chrome version UA
-    ua_string = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.86 Safari/537.36"
+
+    # Add proxy authentication if needed
+    if proxy and proxy.username and proxy.password:
+        context_options["proxy"] = {
+            "server": proxy.server_url,
+            "username": proxy.username,
+            "password": proxy.password,
+        }
+    elif proxy:
+        context_options["proxy"] = {"server": proxy.server_url}
+
+    # Explicit UA to match expectation (can be tuned per env)
+    ua_string = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     context_options["user_agent"] = ua_string
+
     if STORAGE_STATE_PATH.exists():
         context = await browser.new_context(
             **context_options, storage_state=str(STORAGE_STATE_PATH)
         )
     else:
         context = await browser.new_context(**context_options)
+
     await context.add_init_script(STEALTH_INIT_SCRIPT)
     page = await context.new_page()
     try:
@@ -198,8 +434,8 @@ async def launch_browser_context(playwright, headless: bool = True):
     except Exception:
         pass
 
+    # Route: only block heavy media; leave scripts alone
     # Route: block trackers/ads/metrics; allow product images/fonts to reduce ERR noise
-    # Fix #7: Block unnecessary requests (analytics, tracking, API calls)
     BLOCK_HOSTS = [
         "googleads.g.doubleclick.net",
         "ad.doubleclick.net",
@@ -213,17 +449,6 @@ async def launch_browser_context(playwright, headless: bool = True):
         "www.zalando.nl/api/t",
         "www.zalando.nl/api/otlp/metrics",
         "www.zalando.nl/api/otlp/trace",
-        "facebook.com",
-        "analytics.google.com",
-        "google-analytics.com",
-    ]
-
-    # Fix #7: Block API paths that trigger detection
-    BLOCK_PATHS = [
-        "/api/otlp/",
-        "/api/cmag",
-        "/api/t/gtm/",
-        "/api/graphql/",
     ]
 
     ALLOW_IMAGE_HOSTS = [
@@ -233,8 +458,9 @@ async def launch_browser_context(playwright, headless: bool = True):
 
     async def _route_handler(route):
         req = route.request
-        url = req.url
-        host = ""
+        if req.resource_type in ("image", "media", "font"):
+            url = req.url
+            host = ""
         try:
             from urllib.parse import urlparse
 
@@ -242,16 +468,8 @@ async def launch_browser_context(playwright, headless: bool = True):
         except Exception:
             pass
 
-        # Fix #7: Block noisy telemetry/ads
+        # Block noisy telemetry/ads
         if any(h in host for h in BLOCK_HOSTS):
-            return await route.abort()
-
-        # Fix #7: Block API paths
-        if any(path in url for path in BLOCK_PATHS):
-            return await route.abort()
-
-        # Fix #7: Block all POST requests to /api/ endpoints
-        if req.method == "POST" and "/api/" in url:
             return await route.abort()
 
         # Allow product media from known CDN hosts; otherwise continue
@@ -272,25 +490,27 @@ async def launch_browser_context(playwright, headless: bool = True):
     return browser, context, page
 
 
-# Simple resource blocker matching the requested API
-async def block_resources(page: Page):
-    async def _route(route):
-        url = route.request.url
-        block_domains = [
-            "otlp",
-            "gtm",
-            "analytics",
-            "facebook",
-            "doubleclick",
-        ]
-        if any(d in url for d in block_domains):
-            return await route.abort()
-        return await route.continue_()
+async def random_delay(min_seconds: float, max_seconds: float):
+    """Add random delay to simulate human behavior."""
+    import random
 
-    try:
-        await page.route("**/*", _route)
-    except Exception:
-        pass
+    delay = random.uniform(min_seconds, max_seconds)
+    logger.debug(f"⏱️ Waiting {delay:.2f} seconds...")
+    await asyncio.sleep(delay)
+
+
+async def exponential_backoff_delay(
+    attempt: int, base_delay: float = 5.0, max_delay: float = 60.0
+):
+    """Calculate and wait for exponential backoff delay."""
+    import random
+
+    delay = min(base_delay * (BACKOFF_MULTIPLIER**attempt), max_delay)
+    # Add jitter
+    jitter = random.uniform(0, delay * 0.1)
+    total_delay = delay + jitter
+    logger.warning(f"⏱️ Backoff delay: {total_delay:.2f} seconds (attempt {attempt})")
+    await asyncio.sleep(total_delay)
 
 
 async def _dismiss_cookie_iframe(page: Page):
@@ -419,10 +639,15 @@ IMAGES_CONTAINER_XPATH = (
 class ZalandoScraper(BatchProcessingMixin):
     """
     Zalando scraper wrapper class for integration with scraper manager.
-    Wraps the standalone scrape_zalando_shoes function.
+    Automatically enables proxy rotation if proxies.json exists.
     """
 
-    def __init__(self, base_url: str = "https://www.zalando.nl/schoenen"):
+    def __init__(
+        self,
+        base_url: str = "https://www.zalando.nl/schoenen",
+        proxy_list: List[Dict[str, Any]] = None,
+        enable_proxy_rotation: bool = None,  # None = auto-detect from proxies.json
+    ):
         # Ensure we always use the correct .nl shoes page, not just zalando.com
         if base_url and "zalando.com" in base_url and "zalando.nl" not in base_url:
             logger.warning(
@@ -434,7 +659,30 @@ class ZalandoScraper(BatchProcessingMixin):
             base_url = "https://www.zalando.nl/schoenen"
 
         self.base_url = base_url
-        logger.info(f"Zalando scraper initialized with base_url: {self.base_url}")
+
+        # Auto-enable proxy rotation if proxies.json exists (unless explicitly disabled)
+        if enable_proxy_rotation is None:
+            # Check if proxies.json exists
+            if PROXY_CONFIG_PATH.exists():
+                enable_proxy_rotation = True
+                logger.info(
+                    "✅ Found proxies.json - enabling proxy rotation automatically"
+                )
+            else:
+                enable_proxy_rotation = False
+                logger.info("ℹ️  No proxies.json found - running without proxy rotation")
+
+        self.proxy_manager = ProxyManager(
+            proxy_list=proxy_list, enable_rotation=enable_proxy_rotation
+        )
+
+        if self.proxy_manager.enable_rotation:
+            logger.info(
+                f"🌐 Proxy rotation enabled with {len(self.proxy_manager.proxies)} proxies"
+            )
+        else:
+            logger.info("🔓 Running without proxy rotation")
+        logger.info(f"🎯 Base URL: {self.base_url}")
 
     async def scrape(
         self,
@@ -444,398 +692,54 @@ class ZalandoScraper(BatchProcessingMixin):
         is_cancelled=None,
     ):
         """
-        Recovery-enabled scrape with:
-        - Progressive backoff on 403 (5s -> 10s -> 20s ... capped at 60s)
-        - Random delays between pages (3–8s) and products (0.6–1.8s)
-        - User-agent + viewport rotation every N pages
-        - Session rotation/cookie clearing on repeated failures
-        - Circuit breaker: pause 5 minutes after 3 consecutive page failures
-        - Checkpoint/resume (page, totals, failed URLs)
-        - Graceful shutdown on SIGTERM/SIGINT (save state, close browser)
-        """
-        import random, signal, time
-        from urllib.parse import urlparse
+        Scrape Zalando shoes with real-time batch processing support.
 
+        Args:
+            max_pages: Maximum number of pages to scrape (None = all pages)
+            batch_callback: Async function to call with each batch of products
+            batch_size: Number of products to collect before calling batch_callback
+            is_cancelled: Optional function to check if scraping should be cancelled
+
+        Process:
+        1. Launch browser and navigate to Zalando search
+        2. Process each page sequentially
+        3. For each page: extract product links → scrape products → batch process
+        4. Check uniqueness and insert into DB via batch_callback
+        """
         if is_cancelled:
             logger.info("🛑 Cancellation support enabled for this scraper")
 
-        # Load external config if present
-        try:
-            cfg_path = Path(__file__).parent / "config" / "zalando_config.json"
-            if cfg_path.exists():
-                cfg = json.loads(cfg_path.read_text())
-                global DEFAULT_TIMEOUT, NAVIGATION_TIMEOUT, MAX_RETRIES
-                DEFAULT_TIMEOUT = int(cfg.get("default_timeout_ms", DEFAULT_TIMEOUT))
-                NAVIGATION_TIMEOUT = int(
-                    cfg.get("navigation_timeout_ms", NAVIGATION_TIMEOUT)
-                )
-                MAX_RETRIES = int(cfg.get("max_retries", MAX_RETRIES))
-                page_delay = cfg.get("page_delay_seconds", {"min": 3, "max": 8})
-                product_delay = cfg.get(
-                    "product_delay_seconds", {"min": 0.6, "max": 1.8}
-                )
-                backoff_cfg = cfg.get(
-                    "backoff",
-                    {"initial_seconds": 5, "factor": 2.0, "max_seconds": 60},
-                )
-                pages_per_session = int(cfg.get("pages_per_session", 5))
-                cb_failures = int(
-                    cfg.get("consecutive_failures_for_circuit_breaker", 3)
-                )
-                cb_sleep = int(cfg.get("circuit_breaker_sleep_seconds", 300))
-                checkpoint_interval = int(cfg.get("checkpoint_interval_products", 20))
-                rotate_on_failures = int(cfg.get("session_rotation_on_failures", 2))
-                health_timeout = int(cfg.get("healthcheck_timeout_seconds", 10))
-            else:
-                page_delay = {"min": 3, "max": 8}
-                product_delay = {"min": 0.6, "max": 1.8}
-                backoff_cfg = {"initial_seconds": 5, "factor": 2.0, "max_seconds": 60}
-                pages_per_session = 5
-                cb_failures = 3
-                cb_sleep = 300
-                checkpoint_interval = 20
-                rotate_on_failures = 2
-                health_timeout = 10
-        except Exception as e:
-            logger.warning(f"Failed loading zalando_config.json: {e}")
-            page_delay = {"min": 3, "max": 8}
-            product_delay = {"min": 0.6, "max": 1.8}
-            backoff_cfg = {"initial_seconds": 5, "factor": 2.0, "max_seconds": 60}
-            pages_per_session = 5
-            cb_failures = 3
-            cb_sleep = 300
-            checkpoint_interval = 20
-            rotate_on_failures = 2
-            health_timeout = 10
-
-        # Fix #1: URL Blocklist - NEVER retry blocked URLs
-        blocked_urls = set()  # Permanently blocked (403/429)
-        blocked_urls_file = Path(__file__).parent / "zalando_blocked_urls.json"
-
-        # Fix #3: Deduplication - Skip duplicate products
-        seen_urls = set()  # Track visited URLs
-        seen_products = set()  # Track brand+name combinations
-
-        # Fix #4: Adaptive Rate Limiter
-        current_delay = 3.0  # Start with 3 seconds
-        min_delay = 3.0
-        max_delay = 60.0
-
-        # Fix #5: Failed URLs tracking
-        failed_urls_file = Path(__file__).parent / "zalando_failed_urls.json"
-        failed_urls_list = []  # Track all failures with details
-
-        # Fix #2: Circuit breaker counters
-        consecutive_403_count = 0
-        consecutive_429_count = 0
-        circuit_breaker_tripped = False
-
-        # Load blocklist if exists
-        if blocked_urls_file.exists():
-            try:
-                blocked_urls = set(json.loads(blocked_urls_file.read_text()))
-                logger.info(
-                    f"📋 Loaded {len(blocked_urls)} blocked URLs from previous run"
-                )
-            except Exception as e:
-                logger.warning(f"Could not load blocked URLs: {e}")
-
-        # Checkpointing
-        checkpoint_file = Path(__file__).parent / "scraper_checkpoint.json"
-        state = {
-            "current_page": 1,
-            "products_scraped": 0,
-            "unique_products": 0,
-            "duplicates_skipped": 0,
-            "blocked_count": 0,
-            "failed_urls": [],
-            "total_pages": None,
-            "last_successful_index": 0,
-        }
-
-        def load_checkpoint():
-            try:
-                if checkpoint_file.exists():
-                    s = json.loads(checkpoint_file.read_text())
-                    state.update(s)
-                    logger.info(
-                        f"🔁 Resuming from checkpoint: page {state['current_page']}"
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to load checkpoint: {e}")
-
-        def save_checkpoint():
-            try:
-                checkpoint_file.write_text(json.dumps(state, indent=2))
-                logger.info(
-                    f"💾 Checkpoint: page={state['current_page']}, products={state['products_scraped']}, unique={state['unique_products']}, blocked={state['blocked_count']}"
-                )
-            except Exception as e:
-                logger.warning(f"Failed to save checkpoint: {e}")
-
-        # Fix #1: Blocklist management
-        def add_to_blocklist(url: str, status_code: int):
-            nonlocal blocked_urls, state
-            if url not in blocked_urls:
-                blocked_urls.add(url)
-                state["blocked_count"] += 1
-                try:
-                    blocked_urls_file.write_text(
-                        json.dumps(list(blocked_urls), indent=2)
-                    )
-                    logger.error(f"🚫 URL BLOCKED (HTTP {status_code}): {url[:80]}")
-                except Exception as e:
-                    logger.error(f"Could not save blocked URL: {e}")
-
-        def is_blocked(url: str) -> bool:
-            return url in blocked_urls
-
-        # Fix #3: Deduplication helpers
-        def is_duplicate_url(url: str) -> bool:
-            return url in seen_urls
-
-        def is_duplicate_product(brand: str, name: str) -> bool:
-            key = f"{brand.lower().strip()}::{name.lower().strip()}"
-            return key in seen_products
-
-        def mark_url_seen(url: str):
-            seen_urls.add(url)
-
-        def mark_product_seen(brand: str, name: str):
-            key = f"{brand.lower().strip()}::{name.lower().strip()}"
-            seen_products.add(key)
-
-        # Fix #4: Adaptive rate limiting
-        def adjust_delay_on_429():
-            nonlocal current_delay
-            old = current_delay
-            current_delay = min(current_delay * 3.0, max_delay)
-            logger.warning(
-                f"⏱️  Rate limit (429) - delay: {old:.1f}s → {current_delay:.1f}s"
-            )
-
-        def adjust_delay_on_403():
-            nonlocal current_delay
-            old = current_delay
-            current_delay = min(current_delay * 2.0, max_delay)
-            logger.warning(
-                f"⏱️  Forbidden (403) - delay: {old:.1f}s → {current_delay:.1f}s"
-            )
-
-        def adjust_delay_on_success():
-            nonlocal current_delay
-            old = current_delay
-            current_delay = max(current_delay * 0.9, min_delay)
-            if old != current_delay:
-                logger.debug(f"⏱️  Success - delay: {old:.1f}s → {current_delay:.1f}s")
-
-        def get_current_delay() -> float:
-            import random
-
-            jitter = random.uniform(0, 2.0)
-            return current_delay + jitter
-
-        # Fix #5: Failed URLs tracking
-        def save_failed_url(
-            url: str, reason: str, status_code: int = None, error_msg: str = ""
-        ):
-            nonlocal failed_urls_list
-            from datetime import datetime, timezone
-
-            failed_entry = {
-                "url": url,
-                "reason": reason,
-                "status_code": status_code,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "error_message": error_msg,
-            }
-            failed_urls_list.append(failed_entry)
-            try:
-                failed_urls_file.write_text(json.dumps(failed_urls_list, indent=2))
-                logger.warning(f"📝 Failed URL logged: {reason} - {url[:80]}")
-            except Exception as e:
-                logger.error(f"Could not save failed URL: {e}")
-
-        # Fix #2: Circuit breaker helpers
-        def record_403():
-            nonlocal \
-                consecutive_403_count, \
-                consecutive_429_count, \
-                circuit_breaker_tripped
-            consecutive_403_count += 1
-            consecutive_429_count = 0  # Reset 429 counter
-            logger.warning(f"⚠️  HTTP 403 count: {consecutive_403_count}/3")
-            if consecutive_403_count >= 3:
-                circuit_breaker_tripped = True
-                logger.error(f"🔴 CIRCUIT BREAKER TRIPPED (3 consecutive 403s)")
-
-        def record_429():
-            nonlocal \
-                consecutive_403_count, \
-                consecutive_429_count, \
-                circuit_breaker_tripped
-            consecutive_429_count += 1
-            consecutive_403_count = 0  # Reset 403 counter
-            logger.warning(f"⚠️  HTTP 429 count: {consecutive_429_count}/3")
-            if consecutive_429_count >= 3:
-                circuit_breaker_tripped = True
-                logger.error(f"🔴 CIRCUIT BREAKER TRIPPED (3 consecutive 429s)")
-
-        def record_success():
-            nonlocal consecutive_403_count, consecutive_429_count
-            if consecutive_403_count > 0 or consecutive_429_count > 0:
-                logger.info(
-                    f"✅ Success - resetting failure counters (403={consecutive_403_count}, 429={consecutive_429_count})"
-                )
-            consecutive_403_count = 0
-            consecutive_429_count = 0
-
-        async def handle_circuit_breaker():
-            nonlocal circuit_breaker_tripped, browser, context, page, current_delay
-            if circuit_breaker_tripped:
-                logger.error(f"🔴 Circuit breaker active - pausing for {cb_sleep}s")
-                save_checkpoint()
-                await asyncio.sleep(cb_sleep)
-
-                # Close and recreate browser context
-                try:
-                    await context.close()
-                    await browser.close()
-                except Exception:
-                    pass
-
-                logger.info("🔄 Creating fresh browser context after circuit breaker")
-                browser, context, page = await open_context_with_rotation(
-                    random.choice(USER_AGENTS)
-                )
-
-                # Fix #5: Re-register event handlers after reset
-                page.on("requestfailed", _handle_request_failed)
-                page.on("response", _handle_response)
-
-                # Reset state
-                circuit_breaker_tripped = False
-                consecutive_403_count = 0
-                consecutive_429_count = 0
-                current_delay = min_delay  # Reset delay
-                logger.info("🟢 Circuit breaker reset - resuming scraping")
-                return browser, context, page
-            return browser, context, page
-
-        # Backoff helpers
-        def progressive_backoff(attempt):
-            base = backoff_cfg.get("initial_seconds", 5)
-            factor = backoff_cfg.get("factor", 2.0)
-            max_s = backoff_cfg.get("max_seconds", 60)
-            delay = min(max_s, base * (factor ** max(0, attempt)))
-            # add small jitter
-            delay += random.uniform(0, 1.5)
-            return delay
-
-        # UA rotation
-        USER_AGENTS = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.86 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.86 Safari/537.36",
-        ]
-
-        def random_viewport():
-            w = random.randint(1280, 1920)
-            h = random.randint(768, 1200)
-            return {"width": w, "height": h}
-
-        # Health check
-        def site_health_ok():
-            try:
-                r = requests.get(
-                    self.base_url,
-                    timeout=health_timeout,
-                    headers={
-                        "User-Agent": random.choice(USER_AGENTS),
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                    },
-                )
-                return r.status_code < 500
-            except Exception:
-                return False
-
-        # Graceful shutdown
-        shutting_down = {"flag": False}
-
-        def _shutdown_handler(signum, frame):
-            logger.warning(
-                f"Received signal {signum}; saving checkpoint and exiting..."
-            )
-            shutting_down["flag"] = True
-            save_checkpoint()
-
-        # Register signals (Linux containers)
-        try:
-            signal.signal(signal.SIGTERM, _shutdown_handler)
-            signal.signal(signal.SIGINT, _shutdown_handler)
-        except Exception:
-            pass
-
-        # Random delay helpers
-        def sleep_page_delay():
-            return asyncio.sleep(random.uniform(page_delay["min"], page_delay["max"]))
-
-        def sleep_product_delay():
-            return asyncio.sleep(
-                random.uniform(product_delay["min"], product_delay["max"])
-            )
-
-        # Begin
-        logger.info("Starting Zalando scraper with recovery + checkpointing")
+        logger.info("Starting Zalando scraper with real-time batch processing")
         logger.info(f"Base URL: {self.base_url}")
-        load_checkpoint()
 
         results = []
         current_batch = []
         should_stop = False
         global_idx = 1
-        consecutive_failures = 0
-        failures_in_session = 0
-        pages_in_session = 0
+        current_proxy = (
+            self.proxy_manager.get_next_proxy()
+            if self.proxy_manager.enable_rotation
+            else None
+        )
+        failed_attempts = 0
 
         async with async_playwright() as p:
-            # launcher/context factory
-            async def open_context_with_rotation(user_agent=None):
-                nonlocal p
-                browser, context, page = await launch_browser_context(p, headless=True)
-                # override UA by recreating context for stricter UA rotation
-                if user_agent:
-                    await context.close()
-                    context_opts = BASE_CONTEXT_OPTIONS.copy()
-                    context_opts["viewport"] = random_viewport()
-                    context_opts["user_agent"] = user_agent
-                    browser = await p.chromium.launch(
-                        headless=True,
-                        args=[
-                            "--disable-blink-features=AutomationControlled",
-                            "--disable-dev-shm-usage",
-                            "--no-sandbox",
-                        ],
-                        ignore_default_args=["--enable-automation"],
-                    )
-                    context = await browser.new_context(**context_opts)
-                    await context.add_init_script(STEALTH_INIT_SCRIPT)
-                    page = await context.new_page()
-                await block_resources(page)
-                page.set_default_timeout(DEFAULT_TIMEOUT)
-                page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
-                return browser, context, page
-
-            # initial context
-            browser, context, page = await open_context_with_rotation(
-                random.choice(USER_AGENTS)
+            # Launch browser with centralized configuration and proxy
+            browser, context, page = await launch_browser_context(
+                p, headless=True, proxy=current_proxy
             )
             consent_button_selector = CONSENT_BUTTON_SELECTOR
 
-            # Event wiring
+            # Wire up verbose Playwright event logging so we can trace stuck requests
+            def _handle_console(msg):
+                try:
+                    logger.debug(f"[Console:{msg.type.lower()}] {msg.text}")
+                except Exception:
+                    pass
+
             def _handle_request_failed(request):
                 try:
+                    # Suppress logging for intentionally blocked tracker/ads
                     from urllib.parse import urlparse
 
                     host = urlparse(request.url).netloc
@@ -850,8 +754,9 @@ class ZalandoScraper(BatchProcessingMixin):
                     }
                     if host in suppress_hosts:
                         return
+
                     failure = request.failure
-                    logger.debug(
+                    logger.warning(
                         f"Request failed: {request.method} {request.url} -> {failure}"
                     )
                 except Exception:
@@ -860,90 +765,52 @@ class ZalandoScraper(BatchProcessingMixin):
             def _handle_response(response):
                 try:
                     if response.status == 403:
-                        logger.warning(
-                            f"HTTP 403 for {response.request.method} {response.url}"
+                        logger.error(
+                            f"🚫 HTTP 403 Forbidden - possible rate limiting or IP ban"
                         )
-                    # Fix #4: Add 429 detection to trigger circuit breaker
-                    if response.status == 429:
+                    elif response.status >= 400:
                         logger.warning(
-                            f"HTTP 429 for {response.request.method} {response.url}"
+                            f"HTTP {response.status} for {response.request.method} {response.url}"
                         )
-                        # If it's a main navigation (not just API), trigger circuit breaker
-                        if ".html" in response.url or "/schoenen" in response.url:
-                            record_429()  # This will trip circuit breaker after 3
                 except Exception:
                     pass
 
+            page.on("console", _handle_console)
             page.on("requestfailed", _handle_request_failed)
             page.on("response", _handle_response)
 
             try:
-                # Add random initial delay to appear more human (1-5 seconds)
-                initial_delay = random.uniform(1, 5)
-                logger.info(f"⏱️  Initial delay: {initial_delay:.1f}s (anti-detection)")
-                await asyncio.sleep(initial_delay)
-
-                # Navigate to base URL with retry/backoff and 403 detection
-                base_loaded = False
-                for attempt in range(MAX_RETRIES + 3):  # More retries for initial load
+                # Navigate to base URL with retry logic
+                logger.info(f"Navigating to {self.base_url}")
+                for attempt in range(MAX_RETRIES):
                     try:
-                        response = await page.goto(
+                        logger.debug(
+                            f"[Attempt {attempt + 1}/{MAX_RETRIES}] goto {self.base_url} "
+                            f"(wait_until='load', timeout={NAVIGATION_TIMEOUT}ms)"
+                        )
+                        await page.goto(
                             self.base_url,
                             wait_until="domcontentloaded",
                             timeout=NAVIGATION_TIMEOUT,
                         )
-
-                        # Check for 403 block immediately
-                        if response and response.status == 403:
-                            logger.error(
-                                f"🚫 HTTP 403 on base navigation (attempt {attempt + 1}/{MAX_RETRIES + 3})"
-                            )
-
-                            # Rotate session and increase delay
-                            if attempt < MAX_RETRIES + 2:
-                                d = (
-                                    progressive_backoff(attempt) * 2
-                                )  # Double backoff for base nav
-                                logger.warning(
-                                    f"🔄 Rotating session and waiting {d:.1f}s..."
-                                )
-
-                                try:
-                                    await context.close()
-                                    await browser.close()
-                                except Exception:
-                                    pass
-
-                                # Wait before creating new session
-                                await asyncio.sleep(d)
-
-                                # Create fresh session with new UA
-                                (
-                                    browser,
-                                    context,
-                                    page,
-                                ) = await open_context_with_rotation(
-                                    random.choice(USER_AGENTS)
-                                )
-                                page.on("requestfailed", _handle_request_failed)
-                                page.on("response", _handle_response)
-                                continue
-                            else:
-                                raise Exception(
-                                    f"Failed after {MAX_RETRIES + 3} attempts - Zalando may be blocking this IP"
-                                )
-
-                        # Success - try to handle consent
+                        logger.debug(
+                            f"Page loaded. Current URL: {page.url} | Title: {await page.title()}"
+                        )
+                        # Handle cookie consent overlay (appears frequently on Zalando)
                         try:
                             consent_btn = page.locator(consent_button_selector)
                             if await consent_btn.is_visible(timeout=2000):
+                                logger.info(
+                                    "Clicking Zalando cookie consent button (base page)"
+                                )
                                 await consent_btn.click(timeout=5000)
                                 await asyncio.sleep(1)
                         except Exception:
-                            pass
-
+                            logger.debug(
+                                "Cookie consent button not found or already dismissed"
+                            )
                         await wait_for_main_content(page, consent_button_selector)
-
+                        # Persist storage state (cookies) after first success
                         try:
                             STORAGE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
                             await page.context.storage_state(
@@ -951,458 +818,249 @@ class ZalandoScraper(BatchProcessingMixin):
                             )
                         except Exception:
                             pass
-
-                        base_loaded = True
+                        logger.debug("#main-content detected; proceeding with scrape")
                         break
-
                     except Exception as e:
-                        if attempt < MAX_RETRIES + 2:
-                            d = progressive_backoff(attempt) * 1.5
+                        if attempt < MAX_RETRIES - 1:
                             logger.warning(
-                                f"Base navigation failed: {e}. Retrying in {d:.1f}s (attempt {attempt + 1}/{MAX_RETRIES + 3})"
+                                f"Navigation attempt {attempt + 1} failed "
+                                f"({type(e).__name__}: {e}). Retrying after {RETRY_DELAY}s..."
                             )
-                            await asyncio.sleep(d)
+                            try:
+                                logger.debug(
+                                    f"Page URL after failure: {page.url} "
+                                    f"| response status unknown (timeout before load)"
+                                )
+                            except Exception:
+                                pass
+                            await asyncio.sleep(RETRY_DELAY)
                         else:
+                            logger.error(
+                                f"Failed to navigate after {MAX_RETRIES} attempts"
+                            )
                             raise
 
-                if not base_loaded:
-                    raise Exception(
-                        "Failed to load base page - site may be blocking access"
-                    )
-
-                # Resolve pages to scrape (respect checkpoint)
+                # Get total pages
                 total_pages = await get_pagination_info(page)
-                state["total_pages"] = total_pages
-                start_page = max(1, int(state["current_page"]))
-                last_page = min(total_pages, max_pages) if max_pages else total_pages
-                logger.info(
-                    f"🧭 Detected {total_pages} total pages; scraping {start_page}..{last_page}"
+                pages_to_scrape = (
+                    min(total_pages, max_pages) if max_pages else total_pages
                 )
 
-                page_num = start_page
-                while page_num <= last_page:
-                    if should_stop or (is_cancelled and is_cancelled()):
-                        logger.warning("🛑 Cancellation detected; saving and exiting")
-                        save_checkpoint()
+                logger.info(f"🧭 Detected {total_pages} total pages")
+                logger.info(f"📄 Will scrape {pages_to_scrape} pages")
+
+                # Process each page sequentially
+                for page_num in range(1, pages_to_scrape + 1):
+                    if should_stop:
                         break
 
-                    # Circuit breaker
-                    if consecutive_failures >= cb_failures:
-                        logger.warning(
-                            f"⛔ Circuit breaker: {consecutive_failures} consecutive failures; sleeping {cb_sleep}s"
-                        )
-                        save_checkpoint()
-                        await asyncio.sleep(cb_sleep)
-                        consecutive_failures = 0
-                        failures_in_session = 0
-                        # rotate session after breaker
-                        try:
-                            await context.close()
-                            await browser.close()
-                        except Exception:
-                            pass
-                        browser, context, page = await open_context_with_rotation(
-                            random.choice(USER_AGENTS)
-                        )
+                    logger.info(f"\n📄 Loading page {page_num}/{pages_to_scrape}...")
 
-                    # UA/viewport rotation every N pages
-                    if pages_in_session >= pages_per_session:
-                        pages_in_session = 0
-                        try:
-                            await context.close()
-                            await browser.close()
-                        except Exception:
-                            pass
-                        browser, context, page = await open_context_with_rotation(
-                            random.choice(USER_AGENTS)
-                        )
-
+                    # Navigate to page with retry
                     page_url = f"{self.base_url}?p={page_num}"
-                    logger.info(f"\n📄 Loading page {page_num}/{last_page}: {page_url}")
-
-                    page_loaded = False
                     for attempt in range(MAX_RETRIES):
                         try:
-                            response = await page.goto(
+                            await page.goto(
                                 page_url,
                                 wait_until="domcontentloaded",
                                 timeout=NAVIGATION_TIMEOUT,
                             )
-                            if response and response.status == 403:
-                                d = progressive_backoff(attempt)
-                                logger.warning(
-                                    f"HTTP 403 for GET {page_url}; backoff {d:.1f}s"
-                                )
-                                await asyncio.sleep(d)
-                                # rotate session on repeated 403s
-                                failures_in_session += 1
-                                if failures_in_session >= rotate_on_failures:
-                                    failures_in_session = 0
-                                    try:
-                                        await context.close()
-                                        await browser.close()
-                                    except Exception:
-                                        pass
-                                    (
-                                        browser,
-                                        context,
-                                        page,
-                                    ) = await open_context_with_rotation(
-                                        random.choice(USER_AGENTS)
-                                    )
-                                continue
 
                             try:
                                 consent_btn = page.locator(consent_button_selector)
                                 if await consent_btn.is_visible(timeout=2000):
+                                    logger.info(
+                                        f"Clicking cookie consent button on page {page_num}"
+                                    )
                                     await consent_btn.click(timeout=5000)
                                     await asyncio.sleep(1)
                             except Exception:
                                 pass
-
                             await wait_for_main_content(page, consent_button_selector)
-                            page_loaded = True
                             break
                         except Exception as e:
                             if attempt < MAX_RETRIES - 1:
-                                d = progressive_backoff(attempt)
                                 logger.warning(
-                                    f"Page load failed: {e}; retrying in {d:.1f}s"
+                                    f"Page load attempt {attempt + 1} failed: {e}. Retrying..."
                                 )
-                                await asyncio.sleep(d)
+                                await asyncio.sleep(RETRY_DELAY)
                             else:
-                                logger.error(f"Failed to load page {page_num}: {e}")
+                                logger.error(f"Failed to load page {page_num}")
+                                break
 
-                    if not page_loaded:
-                        consecutive_failures += 1
-                        # Health check to differentiate broader outage
-                        if not site_health_ok():
-                            logger.warning(
-                                "Site health check failed; pausing briefly before next attempt"
-                            )
-                            await asyncio.sleep(30)
-                        page_num += 1  # skip to next page instead of getting stuck
-                        pages_in_session += 1
-                        continue
-
-                    # Reset failure counters on success
-                    consecutive_failures = 0
-                    failures_in_session = 0
-                    pages_in_session += 1
-
-                    # Links
+                    # Get product links from current page
                     product_links = await get_product_links(page)
                     logger.info(
                         f"🔗 Page {page_num}: Found {len(product_links)} product links"
                     )
+
                     if not product_links:
                         logger.warning(f"No product links found on page {page_num}")
-                        await sleep_page_delay()
-                        page_num += 1
-                        state["current_page"] = page_num
-                        save_checkpoint()
                         continue
 
-                    # Scrape products with comprehensive error handling
+                    # Extract and process each product on this page
                     for local_idx, product_url in enumerate(product_links, 1):
+                        # Check for cancellation
                         if is_cancelled and is_cancelled():
-                            logger.warning("🛑 Cancellation detected; aborting scrape")
+                            logger.warning(
+                                "🛑 Cancellation detected - stopping scraper immediately"
+                            )
                             should_stop = True
                             break
 
-                        # Fix #2: Check circuit breaker before each product
-                        if circuit_breaker_tripped:
-                            browser, context, page = await handle_circuit_breaker()
+                        if should_stop:
+                            break
 
-                        # Fix #1: Skip if URL is permanently blocked
-                        if is_blocked(product_url):
-                            logger.info(
-                                f"⏭️  Product {local_idx}: BLOCKED (in blocklist) - skipping"
-                            )
-                            global_idx += 1
-                            continue
-
-                        # Fix #3: Skip if URL already visited
-                        if is_duplicate_url(product_url):
-                            logger.info(
-                                f"⏭️  Product {local_idx}: DUPLICATE URL - skipping"
-                            )
-                            state["duplicates_skipped"] += 1
-                            global_idx += 1
-                            continue
-
-                        # Mark URL as seen
-                        mark_url_seen(product_url)
-
-                        # Fix #4: Apply adaptive rate limiting
-                        delay = get_current_delay()
-                        await asyncio.sleep(delay)
-
-                        logger.info(
-                            f"\n🔍 Product {local_idx}/{len(product_links)}: Scraping..."
-                        )
-
-                        # Rotate user-agent for each product to avoid detection
                         try:
-                            current_ua = random.choice(USER_AGENTS)
-                            await page.evaluate(f"""() => {{
-                                Object.defineProperty(navigator, 'userAgent', {{
-                                    get: () => '{current_ua}'
-                                }});
-                            }}""")
-                        except Exception:
-                            pass
+                            logger.info(
+                                f"\n  Product {global_idx} (Page {page_num}:{local_idx}/{len(product_links)}): Scraping..."
+                            )
 
-                        # Fix #2: Wrap product navigation in retry loop with early exit
-                        product_loaded = False
-                        response = None
-                        for product_attempt in range(MAX_RETRIES):
-                            try:
-                                response = await page.goto(
-                                    product_url,
-                                    wait_until="domcontentloaded",
-                                    timeout=NAVIGATION_TIMEOUT,
+                            # Add random delay before each product to appear human-like
+                            await random_delay(MIN_PRODUCT_DELAY, MAX_PRODUCT_DELAY)
+
+                            start_time = asyncio.get_running_loop().time()
+                            details = await extract_product_details(page, product_url)
+                            response_time = (
+                                asyncio.get_running_loop().time() - start_time
+                            )
+
+                            if details and details.get("sole_image_url"):
+                                # Record success for current proxy
+                                if current_proxy:
+                                    current_proxy.record_success(response_time)
+
+                                # Normalize to expected format
+                                normalized_product = {
+                                    "brand": details.get("brand", "Unknown"),
+                                    "name": details.get("name", "Unknown"),
+                                    "url": details.get("source_url", ""),
+                                    "image_url": details.get("sole_image_url", ""),
+                                    "product_type": "shoe",
+                                }
+
+                                # Log scraped product
+                                logger.info(f"✅ Scraped Product #{global_idx}:")
+                                logger.info(f"   Brand: {normalized_product['brand']}")
+                                logger.info(
+                                    f"   Product Name: {normalized_product['name']}"
+                                )
+                                logger.info(
+                                    f"   Product URL: {normalized_product['url']}"
+                                )
+                                sole_url = normalized_product["image_url"]
+                                logger.info(
+                                    f"   Sole Image URL: {sole_url[:80] + '...' if len(sole_url) > 80 else sole_url}"
+                                )
+                                logger.info(
+                                    f"   Total Images Found: {details.get('image_count', 0)}"
                                 )
 
-                                # Check status immediately - DON'T retry 403/429
-                                if response and response.status in [403, 429]:
-                                    if response.status == 403:
-                                        logger.error(
-                                            f"❌ Product {local_idx}: HTTP 403 FORBIDDEN"
-                                        )
-                                        add_to_blocklist(product_url, 403)
-                                        save_failed_url(product_url, "blocked_403", 403)
-                                        record_403()
-                                        adjust_delay_on_403()
-                                    elif response.status == 429:
-                                        logger.error(
-                                            f"❌ Product {local_idx}: HTTP 429 RATE LIMITED"
-                                        )
-                                        add_to_blocklist(product_url, 429)
-                                        save_failed_url(
-                                            product_url, "rate_limited_429", 429
-                                        )
-                                        record_429()
-                                        adjust_delay_on_429()
+                                results.append(normalized_product)
+                                current_batch.append(normalized_product)
 
-                                    # Fix #1: Check circuit breaker IMMEDIATELY after detection
-                                    if circuit_breaker_tripped:
+                                # Process batch when reaching batch_size
+                                if len(current_batch) >= batch_size and batch_callback:
+                                    logger.info(
+                                        f"Processing batch of {len(current_batch)} products..."
+                                    )
+                                    prepared_batch = self._prepare_batch_for_processing(
+                                        current_batch,
+                                        brand_field="brand",
+                                        name_field="name",
+                                        url_field="url",
+                                        image_url_field="image_url",
+                                    )
+
+                                    if prepared_batch:
+                                        should_continue = await batch_callback(
+                                            prepared_batch
+                                        )
+                                        if not should_continue:
+                                            logger.info(
+                                                "Batch callback returned False, stopping"
+                                            )
+                                            should_stop = True
+
+                                    current_batch = []
+
+                            global_idx += 1
+
+                        except Exception as e:
+                            error_str = str(e)
+
+                            # Check if it's a blocking/timeout error (403, timeout, etc.)
+                            is_blocking_error = (
+                                "403" in error_str
+                                or "Timeout" in error_str
+                                or "net::ERR_ABORTED" in error_str
+                            )
+
+                            if is_blocking_error and self.proxy_manager.enable_rotation:
+                                logger.error(
+                                    f"[Page {page_num}:Product {global_idx}] Blocking error detected: {e}"
+                                )
+
+                                # Rotate proxy and restart browser
+                                new_proxy = self.proxy_manager.rotate_on_failure(
+                                    current_proxy
+                                )
+
+                                if new_proxy:
+                                    logger.info(
+                                        f"🔄 Rotating to new proxy and restarting browser..."
+                                    )
+                                    try:
+                                        await page.close()
+                                        await context.close()
+                                        await browser.close()
+
+                                        # Wait before restarting
+                                        await exponential_backoff_delay(1)
+
+                                        # Restart with new proxy
                                         (
                                             browser,
                                             context,
                                             page,
-                                        ) = await handle_circuit_breaker()
-                                        # Re-register handlers again (in case handle_circuit_breaker was just defined)
+                                        ) = await launch_browser_context(
+                                            p, headless=True, proxy=new_proxy
+                                        )
+                                        page.on("console", _handle_console)
                                         page.on("requestfailed", _handle_request_failed)
                                         page.on("response", _handle_response)
+                                        current_proxy = new_proxy
 
-                                    break  # Don't retry blocked URLs
-
-                                if response and response.status >= 500:
+                                        logger.info(
+                                            "✅ Browser restarted with new proxy"
+                                        )
+                                    except Exception as restart_error:
+                                        logger.error(
+                                            f"Failed to restart browser: {restart_error}"
+                                        )
+                                else:
                                     logger.error(
-                                        f"❌ Product {local_idx}: HTTP {response.status} SERVER ERROR"
+                                        "No available proxies - continuing without rotation"
                                     )
-                                    save_failed_url(
-                                        product_url, "server_error", response.status
-                                    )
-                                    break
-
-                                # Success - page loaded
-                                product_loaded = True
-                                break
-
-                            except asyncio.TimeoutError:
-                                logger.warning(
-                                    f"Product attempt {product_attempt + 1}/{MAX_RETRIES} timed out after {NAVIGATION_TIMEOUT / 1000}s"
+                            else:
+                                logger.error(
+                                    f"[Page {page_num}:Product {global_idx}] Failed to extract {product_url}: {e}"
                                 )
-                                if product_attempt < MAX_RETRIES - 1:
-                                    await asyncio.sleep(3)
-                                else:
-                                    save_failed_url(
-                                        product_url,
-                                        "timeout",
-                                        None,
-                                        f"Timeout after {MAX_RETRIES} attempts",
-                                    )
-                                    break
-                            except Exception as e:
-                                logger.warning(
-                                    f"Product attempt {product_attempt + 1}/{MAX_RETRIES} failed: {str(e)[:100]}"
-                                )
-                                if product_attempt < MAX_RETRIES - 1:
-                                    await asyncio.sleep(3)
-                                else:
-                                    save_failed_url(
-                                        product_url,
-                                        "navigation_error",
-                                        None,
-                                        str(e)[:200],
-                                    )
-                                    break
 
-                        # Fix #3: Skip ALL remaining code if product didn't load or was blocked
-                        if not product_loaded:
-                            logger.error(
-                                f"❌ Product {local_idx}: Failed to load - SKIPPING"
-                            )
                             global_idx += 1
-                            # Fix #6: Save checkpoint every 5 attempts (not just successes)
-                            if global_idx % 5 == 0:
-                                save_checkpoint()
                             continue
 
-                        # ONLY check for main content if page loaded successfully
-                        try:
-                            await page.wait_for_selector("#main-content", timeout=5000)
-                        except Exception:
-                            logger.warning(
-                                f"⚠️  Product {local_idx}: Main content not found within 5s"
-                            )
-                            save_failed_url(
-                                product_url, "timeout", None, "Main content timeout"
-                            )
-                            global_idx += 1
-                            if global_idx % 5 == 0:
-                                save_checkpoint()
-                            continue
+                    # Add random delay between pages to appear human-like
+                    logger.info(
+                        f"📄 Page {page_num} complete. Pausing before next page..."
+                    )
+                    await random_delay(MIN_PAGE_DELAY, MAX_PAGE_DELAY)
 
-                            await asyncio.sleep(1)  # Give page time to render
-
-                            # Extract brand and name
-                            brand = "Unknown"
-                            try:
-                                brand_elem = await page.locator(
-                                    BRAND_XPATH
-                                ).first.text_content(timeout=5000)
-                                brand = brand_elem.strip() if brand_elem else "Unknown"
-                            except Exception:
-                                pass
-
-                            product_name = "Unknown"
-                            try:
-                                name_elem = await page.locator(
-                                    PRODUCT_NAME_XPATH
-                                ).first.text_content(timeout=5000)
-                                product_name = (
-                                    name_elem.strip() if name_elem else "Unknown"
-                                )
-                            except Exception:
-                                pass
-
-                            # Fix #3: Check for duplicate product by brand+name
-                            if is_duplicate_product(brand, product_name):
-                                logger.info(
-                                    f"⏭️  Product {local_idx}: DUPLICATE PRODUCT ({brand} - {product_name}) - skipping"
-                                )
-                                state["duplicates_skipped"] += 1
-                                global_idx += 1
-                                continue
-
-                            # Get images
-                            image_entries = await get_product_images(page)
-                            sole_image_url = (
-                                find_shoe_sole_image(image_entries)
-                                if image_entries
-                                else None
-                            )
-
-                            if not sole_image_url:
-                                logger.warning(
-                                    f"⚠️  Product {local_idx}: No sole image found"
-                                )
-                                save_failed_url(
-                                    product_url,
-                                    "no_data",
-                                    None,
-                                    "No sole image detected",
-                                )
-                                global_idx += 1
-                                continue
-
-                            # SUCCESS!
-                            mark_product_seen(brand, product_name)
-                            record_success()  # Fix #2: Reset circuit breaker counters
-                            adjust_delay_on_success()  # Fix #4: Decrease delay on success
-
-                            normalized_product = {
-                                "brand": brand,
-                                "name": product_name,
-                                "url": product_url,
-                                "image_url": sole_image_url,
-                                "product_type": "shoe",
-                            }
-                            results.append(normalized_product)
-                            current_batch.append(normalized_product)
-                            state["products_scraped"] += 1
-                            state["unique_products"] += 1
-                            state["last_successful_index"] = local_idx
-
-                            logger.info(
-                                f"✅ Product {local_idx}: SUCCESS - {brand} - {product_name}"
-                            )
-
-                            # Process batch
-                            if len(current_batch) >= batch_size and batch_callback:
-                                prepared_batch = self._prepare_batch_for_processing(
-                                    current_batch,
-                                    brand_field="brand",
-                                    name_field="name",
-                                    url_field="url",
-                                    image_url_field="image_url",
-                                )
-                                if prepared_batch:
-                                    should_continue = await batch_callback(
-                                        prepared_batch
-                                    )
-                                    if not should_continue:
-                                        should_stop = True
-                                    current_batch = []
-
-                            # Fix #6: Checkpoint more frequently (every 5 successful products)
-                            if state["products_scraped"] % 5 == 0:
-                                save_checkpoint()
-
-                            global_idx += 1
-
-                        except asyncio.TimeoutError:
-                            logger.error(
-                                f"❌ Product {local_idx}: TIMEOUT after {NAVIGATION_TIMEOUT / 1000}s"
-                            )
-                            save_failed_url(
-                                product_url,
-                                "timeout",
-                                None,
-                                f"Timeout after {NAVIGATION_TIMEOUT / 1000}s",
-                            )
-                            global_idx += 1
-                            # Fix #6: Save checkpoint on failures too
-                            if global_idx % 5 == 0:
-                                save_checkpoint()
-                            continue
-
-                        except Exception as e:
-                            logger.error(
-                                f"❌ Product {local_idx}: EXTRACTION ERROR - {str(e)[:100]}"
-                            )
-                            save_failed_url(
-                                product_url, "extraction_error", None, str(e)[:200]
-                            )
-                            global_idx += 1
-                            # Fix #6: Save checkpoint on failures too
-                            if global_idx % 5 == 0:
-                                save_checkpoint()
-                            continue  # after page
-                    if should_stop or shutting_down["flag"]:
-                        save_checkpoint()
-                        break
-
-                    await sleep_page_delay()
-                    page_num += 1
-                    state["current_page"] = page_num
-                    save_checkpoint()
-
-                # flush remaining batch
+                # Process remaining items in final batch
                 if current_batch and batch_callback and not should_stop:
+                    logger.info(
+                        f"Processing final batch of {len(current_batch)} products..."
+                    )
                     prepared_batch = self._prepare_batch_for_processing(
                         current_batch,
                         brand_field="brand",
@@ -1410,39 +1068,44 @@ class ZalandoScraper(BatchProcessingMixin):
                         url_field="url",
                         image_url_field="image_url",
                     )
+
                     if prepared_batch:
                         await batch_callback(prepared_batch)
 
-                # Fix #10: Comprehensive final statistics
-                logger.info("\n" + "=" * 80)
-                logger.info("📊 SCRAPING COMPLETE - FINAL STATISTICS")
-                logger.info("=" * 80)
-                logger.info(f"✅ Products scraped: {state['products_scraped']}")
-                logger.info(f"🎯 Unique products: {state['unique_products']}")
-                logger.info(f"⏭️  Duplicates skipped: {state['duplicates_skipped']}")
-                logger.info(f"🚫 URLs blocked: {state['blocked_count']}")
-                logger.info(f"❌ URLs failed: {len(failed_urls_list)}")
-                logger.info(f"📄 Pages completed: {page_num - start_page}")
-                logger.info(f"💾 Checkpoint saved to: {checkpoint_file}")
-                logger.info(f"📝 Failed URLs saved to: {failed_urls_file}")
-                logger.info(f"🚫 Blocked URLs saved to: {blocked_urls_file}")
-                logger.info("=" * 80)
+                logger.info(f"✅ Scraped {len(results)} products with sole images")
+
+                # Log proxy statistics if proxy rotation was enabled
+                if self.proxy_manager.enable_rotation:
+                    stats = self.proxy_manager.get_stats()
+                    logger.info("\n" + "=" * 60)
+                    logger.info("📊 Proxy Rotation Statistics")
+                    logger.info("=" * 60)
+                    logger.info(f"Total Proxies: {stats['total_proxies']}")
+                    logger.info(f"Active Proxies: {stats['active_proxies']}")
+                    logger.info(f"Total Requests: {stats['total_requests']}")
+                    logger.info(f"Successful: {stats['total_success']}")
+                    logger.info(f"Failed: {stats['total_failures']}")
+                    logger.info(f"Success Rate: {stats['overall_success_rate']:.2%}")
+                    logger.info(f"Rotations: {stats['rotation_count']}")
+                    logger.info("=" * 60 + "\n")
+
+                    # Log individual proxy stats
+                    for proxy in self.proxy_manager.proxies:
+                        if proxy.success_count > 0 or proxy.failure_count > 0:
+                            logger.info(
+                                f"  Proxy {proxy.host}:{proxy.port} - "
+                                f"Success: {proxy.success_count}, "
+                                f"Failed: {proxy.failure_count}, "
+                                f"Rate: {proxy.success_rate:.2%}, "
+                                f"Avg Time: {proxy.avg_response_time:.2f}s"
+                            )
+
+            except Exception as e:
+                logger.error(f"Scraper failed: {e}", exc_info=True)
             finally:
-                try:
-                    await context.close()
-                except Exception:
-                    pass
-                try:
-                    await browser.close()
-                except Exception:
-                    pass
+                await browser.close()
 
         return results
-
-
-# Backwards/explicit name requested in requirements
-class ZalandoScraperWithRecovery(ZalandoScraper):
-    pass
 
 
 async def get_pagination_info(page: Page) -> int:
@@ -1488,15 +1151,13 @@ async def get_product_links(page: Page) -> List[str]:
     Finds all <a> tags with href containing product URLs inside the products container.
     """
     try:
-        # Try XPath container first, then fallback to CSS in main-content
-        try:
-            await page.locator(PRODUCTS_CONTAINER_XPATH).first.wait_for(timeout=8000)
-            links = await page.locator(
-                f'{PRODUCTS_CONTAINER_XPATH}//a[contains(@href, ".html")]'
-            ).all()
-        except Exception:
-            await page.locator("#main-content").first.wait_for(timeout=8000)
-            links = await page.locator('#main-content a[href*=".html"]').all()
+        # Wait for products container to be visible (use locator-based wait to respect XPath)
+        await page.locator(PRODUCTS_CONTAINER_XPATH).first.wait_for(timeout=12000)
+
+        # Get all product links
+        links = await page.locator(
+            f'{PRODUCTS_CONTAINER_XPATH}//a[contains(@href, ".html")]'
+        ).all()
         product_links = []
 
         for link in links:

@@ -1,0 +1,25 @@
+{
+  "proxies": [
+    {
+      "host": "proxy1.example.com",
+      "port": 8080,
+      "username": "your_username",
+      "password": "your_password",
+      "protocol": "http"
+    },
+    {
+      "host": "proxy2.example.com",
+      "port": 8080,
+      "username": "your_username",
+      "password": "your_password",
+      "protocol": "http"
+    },
+    {
+      "host": "socks-proxy.example.com",
+      "port": 1080,
+      "username": null,
+      "password": null,
+      "protocol": "socks5"
+    }
+  ]
+}
