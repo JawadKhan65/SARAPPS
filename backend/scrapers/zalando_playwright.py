@@ -168,20 +168,13 @@ async def launch_browser_context(playwright, headless: bool = True):
         "--disable-accelerated-2d-canvas",
         "--no-zygote",
         "--window-size=1920,1080",
-        # Additional stealth args
-        "--disable-web-security",
-        "--disable-features=IsolateOrigins,site-per-process",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--disable-software-rasterizer",
-        "--disable-extensions",
     ]
 
     if headless:
         args.append("--headless=new")
 
     launch_config = {
-        "headless": False if headless else False,
+        "headless": True,
         "args": args,
         "ignore_default_args": ["--enable-automation"],
     }
