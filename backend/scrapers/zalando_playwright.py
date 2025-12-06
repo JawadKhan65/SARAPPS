@@ -1,705 +1,747 @@
 """
-Playwright-based scraper for Zalando.nl shoes.
+Resilient Zalando Scraper with Production-Grade Error Handling
 
-Scrapes product links from paginated search results, then extracts:
-  - Brand name
-  - Product name
-  - Product URL
-  - Number of product images
+Features:
+- Circuit breaker for automatic cooldown on repeated failures
+- Adaptive rate limiting that responds to site behavior
+- Product deduplication to prevent re-scraping
+- Failed URL tracking with persistent storage
+- Checkpoint/resume capability for crash recovery
+- Graceful shutdown with progress preservation
+- Comprehensive logging and error handling
+- Stealth mode to reduce detection
 
-Returns a list of dictionaries with product metadata.
+NEVER HANGS - Always makes forward progress even after failures
 """
 
 import asyncio
 import json
-import re
-from pathlib import Path
-from io import BytesIO
-from typing import List, Dict, Any, Optional
-from PIL import Image
-import requests
-from playwright.async_api import async_playwright, Page
-
-# get_chromium_launch_config no longer used with custom launch args
 import logging
+import signal
+import time
+from pathlib import Path
+from typing import List, Dict, Any, Optional, Set, Callable
+from datetime import datetime, timezone
+from dataclasses import dataclass, asdict
+from collections import defaultdict
+import random
+import hashlib
+
+from playwright.async_api import async_playwright, Page, BrowserContext
+from PIL import Image
+from io import BytesIO
+
+# Import base scraper mixin
 import sys
 
-# Add backend to path to import models
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from scrapers.base_scraper_mixin import BatchProcessingMixin
 
-
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
-# Increase timeouts and add retry settings
-DEFAULT_TIMEOUT = 60000  # 60 seconds
-NAVIGATION_TIMEOUT = 90000  # 90 seconds for page navigation
-MAX_RETRIES = 3
-RETRY_DELAY = 3  # seconds between retries
-MAIN_CONTENT_SELECTOR = "#main-content"
-CONSENT_BUTTON_SELECTOR = '[data-testid="uc-accept-all-button"]'
-COOKIE_IFRAME_PREFIX = "sp_message_iframe"
-COOKIE_BUTTON_TEXTS = ["OK", "Akkoord", "Alles toestaan", "Alle cookies accepteren"]
-STORAGE_STATE_PATH = Path(__file__).parent / ".storage" / "zalando_storage.json"
 
-# Enhanced stealth initialization script
-STEALTH_INIT_SCRIPT = """
-// Remove webdriver property
-Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+@dataclass
+class FailedUrl:
+    """Record of a failed URL scrape attempt"""
 
-// Add chrome object with more realistic properties
-Object.defineProperty(window, 'chrome', { 
-    value: { 
-        runtime: {},
-        loadTimes: function() {},
-        csi: function() {},
-        app: {}
-    } 
-});
-
-// Override plugins to appear more realistic
-Object.defineProperty(navigator, 'plugins', { 
-    get: () => [
-        {
-            0: {type: "application/x-google-chrome-pdf", suffixes: "pdf", description: "Portable Document Format"},
-            description: "Portable Document Format",
-            filename: "internal-pdf-viewer",
-            length: 1,
-            name: "Chrome PDF Plugin"
-        },
-        {
-            0: {type: "application/pdf", suffixes: "pdf", description: "Portable Document Format"},
-            description: "Portable Document Format", 
-            filename: "mhjfbmdgcfjbbpaeojofohoefgiehjai",
-            length: 1,
-            name: "Chrome PDF Viewer"
-        },
-        {
-            0: {type: "application/x-nacl", suffixes: "", description: "Native Client Executable"},
-            1: {type: "application/x-pnacl", suffixes: "", description: "Portable Native Client Executable"},
-            description: "",
-            filename: "internal-nacl-plugin",
-            length: 2,
-            name: "Native Client"
-        }
-    ]
-});
-
-// Languages
-Object.defineProperty(navigator, 'languages', { get: () => ['nl-NL', 'nl', 'en-US', 'en'] });
-
-// Platform
-Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
-
-// Hardware concurrency
-Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
-
-// Device memory
-Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
-
-// Permissions
-const originalQuery = window.navigator.permissions.query;
-window.navigator.permissions.query = (parameters) =>
-  parameters.name === 'notifications'
-    ? Promise.resolve({ state: Notification.permission })
-    : originalQuery(parameters);
-
-// Override userAgent getter
-Object.defineProperty(navigator, 'userAgent', {
-    get: () => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.86 Safari/537.36'
-});
-
-// Screen properties for more realistic headless
-if (window.outerWidth === 0) {
-    Object.defineProperty(window, 'outerWidth', { get: () => 1280 });
-    Object.defineProperty(window, 'outerHeight', { get: () => 800 });
-}
-
-// Fix iframe contentWindow
-try {
-    const getParameter = WebGLRenderingContext.prototype.getParameter;
-    WebGLRenderingContext.prototype.getParameter = function(parameter) {
-        if (parameter === 37445) return 'Intel Inc.';
-        if (parameter === 37446) return 'Intel Iris OpenGL Engine';
-        return getParameter.call(this, parameter);
-    };
-} catch (err) {}
-"""
-
-# Enhanced context options with more realistic settings
-BASE_CONTEXT_OPTIONS = {
-    "viewport": {"width": 1920, "height": 1080},
-    "device_scale_factor": 1,
-    "is_mobile": False,
-    "has_touch": False,
-    "locale": "nl-NL",
-    "timezone_id": "Europe/Amsterdam",
-    "color_scheme": "light",
-    "java_script_enabled": True,
-    "bypass_csp": True,
-    "ignore_https_errors": True,
-    "extra_http_headers": {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "nl-NL,nl;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-    },
-}
+    url: str
+    reason: str
+    status_code: Optional[int]
+    timestamp: str
+    retry_count: int
+    error_message: str = ""
 
 
-async def launch_browser_context(playwright, headless: bool = True):
+@dataclass
+class Checkpoint:
+    """Scraping progress checkpoint for resume capability"""
+
+    current_page: int
+    products_scraped: int
+    unique_products: int
+    last_successful_index: int
+    blocked_urls_count: int
+    failed_urls_count: int
+    timestamp: str
+    elapsed_seconds: float
+
+
+class CircuitBreaker:
     """
-    Launch Chromium with anti-detection flags (AutomationControlled disabled).
+    Prevents scraper from hammering blocked endpoints
+    Trips after N consecutive failures, forces cooldown period
     """
 
-    # Anti-detection args
-    args = [
-        "--disable-blink-features=AutomationControlled",
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-infobars",
-        "--window-position=0,0",
-        "--ignore-certifcate-errors",
-        "--ignore-certificate-errors-spki-list",
-        "--disable-accelerated-2d-canvas",
-        "--no-zygote",
-        "--window-size=1920,1080",
-    ]
+    def __init__(
+        self,
+        max_consecutive_403: int = 3,
+        max_consecutive_429: int = 3,
+        cooldown_seconds: int = 300,
+    ):
+        self.max_consecutive_403 = max_consecutive_403
+        self.max_consecutive_429 = max_consecutive_429
+        self.cooldown_seconds = cooldown_seconds
 
-    if headless:
-        args.append("--headless=new")
+        self.consecutive_403 = 0
+        self.consecutive_429 = 0
+        self.is_tripped = False
+        self.trip_time: Optional[float] = None
 
-    launch_config = {
-        "headless": False if headless else False,
-        "args": args,
-        "ignore_default_args": ["--enable-automation"],
-    }
-
-    browser = await playwright.chromium.launch(**launch_config)
-    # Load persisted storage (cookies) if available to bypass consent
-    context_options = BASE_CONTEXT_OPTIONS.copy()
-    # Explicit UA to match expectation (can be tuned per env)
-    ua_string = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    context_options["user_agent"] = ua_string
-    if STORAGE_STATE_PATH.exists():
-        context = await browser.new_context(
-            **context_options, storage_state=str(STORAGE_STATE_PATH)
+        logger.info(
+            f"🔌 Circuit breaker initialized: "
+            f"403 threshold={max_consecutive_403}, "
+            f"429 threshold={max_consecutive_429}, "
+            f"cooldown={cooldown_seconds}s"
         )
-    else:
-        context = await browser.new_context(**context_options)
-    await context.add_init_script(STEALTH_INIT_SCRIPT)
-    page = await context.new_page()
-    try:
-        await page.emulate_media(color_scheme="light")
-    except Exception:
-        pass
 
-    # Route: block trackers/ads/metrics; allow product images/fonts to reduce ERR noise
-    BLOCK_HOSTS = [
-        "googleads.g.doubleclick.net",
-        "ad.doubleclick.net",
-        "www.google.com",
-        "www.google.nl",
-        "www.googletagmanager.com",
-        "o4509038451032064.ingest.de.sentry.io",
-        "app.eu.usercentrics.eu",
-        "www.zalando.nl/api/cmag",
-        "www.zalando.nl/api/otlp",
-        "www.zalando.nl/api/t",
-        "www.zalando.nl/api/otlp/metrics",
-        "www.zalando.nl/api/otlp/trace",
-    ]
+    def record_403(self):
+        """Record a 403 Forbidden error"""
+        self.consecutive_403 += 1
+        self.consecutive_429 = 0  # Reset 429 counter
 
-    ALLOW_IMAGE_HOSTS = [
-        ".ztat.net",
-        "cloudfront.net",
-    ]
+        logger.warning(
+            f"⚠️  HTTP 403 count: {self.consecutive_403}/{self.max_consecutive_403}"
+        )
 
-    async def _route_handler(route):
-        req = route.request
-        url = req.url
-        host = ""
-        try:
-            from urllib.parse import urlparse
+        if self.consecutive_403 >= self.max_consecutive_403:
+            self._trip()
 
-            host = urlparse(url).netloc
-        except Exception:
-            pass
+    def record_429(self):
+        """Record a 429 Rate Limited error"""
+        self.consecutive_429 += 1
+        self.consecutive_403 = 0  # Reset 403 counter
 
-        # Block noisy telemetry/ads
-        if any(h in host for h in BLOCK_HOSTS):
-            return await route.abort()
+        logger.warning(
+            f"⚠️  HTTP 429 count: {self.consecutive_429}/{self.max_consecutive_429}"
+        )
 
-        # Allow product media from known CDN hosts; otherwise continue
-        if req.resource_type in ("image", "font", "media"):
-            if any(h in host for h in ALLOW_IMAGE_HOSTS):
-                return await route.continue_()
-            # For other image hosts, still allow; blocking causes ERR_FAILED spam
-            return await route.continue_()
+        if self.consecutive_429 >= self.max_consecutive_429:
+            self._trip()
 
-        return await route.continue_()
+    def record_success(self):
+        """Record successful scrape - resets all counters"""
+        if self.consecutive_403 > 0 or self.consecutive_429 > 0:
+            logger.info("✅ Success - resetting failure counters")
 
-    try:
-        await context.route("**/*", _route_handler)
-    except Exception:
-        pass
-    page.set_default_timeout(DEFAULT_TIMEOUT)
-    page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
-    return browser, context, page
+        self.consecutive_403 = 0
+        self.consecutive_429 = 0
+
+    def _trip(self):
+        """Trip the circuit breaker"""
+        if not self.is_tripped:
+            self.is_tripped = True
+            self.trip_time = time.time()
+            logger.error(
+                f"🔴 CIRCUIT BREAKER TRIPPED! "
+                f"(403: {self.consecutive_403}, 429: {self.consecutive_429}) "
+                f"Cooldown: {self.cooldown_seconds}s"
+            )
+
+    def check_and_wait(self) -> bool:
+        """
+        Check if circuit breaker is tripped
+        If tripped and cooldown expired, reset and return True
+        If still cooling down, return False
+        """
+        if not self.is_tripped:
+            return True
+
+        elapsed = time.time() - self.trip_time
+        remaining = self.cooldown_seconds - elapsed
+
+        if remaining <= 0:
+            logger.info("🟢 Circuit breaker cooldown complete - resetting")
+            self.reset()
+            return True
+
+        logger.warning(f"🔴 Circuit breaker active - {remaining:.1f}s remaining")
+        return False
+
+    def reset(self):
+        """Reset circuit breaker to initial state"""
+        self.consecutive_403 = 0
+        self.consecutive_429 = 0
+        self.is_tripped = False
+        self.trip_time = None
+        logger.info("🔌 Circuit breaker reset")
 
 
-async def _dismiss_cookie_iframe(page: Page):
+class AdaptiveRateLimiter:
     """
-    Handle SourcePoint cookie dialogs that render inside cross-origin iframes.
-    """
-
-    # Try via frame locator first (more robust for cross-origin)
-    try:
-        fl = page.frame_locator(f"iframe[name^='{COOKIE_IFRAME_PREFIX}']")
-        for text in COOKIE_BUTTON_TEXTS:
-            try:
-                btn = fl.locator(f"button:has-text('{text}')")
-                await btn.first.click(timeout=1500)
-                await asyncio.sleep(0.5)
-                return True
-            except Exception:
-                continue
-    except Exception:
-        pass
-
-    # Fallback: iterate frames and try buttons by text
-    try:
-        for frame in page.frames:
-            name = frame.name or ""
-            if COOKIE_IFRAME_PREFIX in name:
-                for text in COOKIE_BUTTON_TEXTS:
-                    try:
-                        btn = frame.locator(f"button:has-text('{text}')")
-                        if await btn.first.is_visible(timeout=1000):
-                            logger.debug(
-                                f"Clicking cookie iframe button '{text}' in frame {name}"
-                            )
-                            await btn.first.click(timeout=2000)
-                            await asyncio.sleep(0.5)
-                            return True
-                    except Exception:
-                        continue
-    except Exception:
-        pass
-
-    return False
-
-
-async def wait_for_main_content(
-    page: Page, consent_button_selector: Optional[str] = None
-):
-    """
-    Wait for Zalando's main content area to be present/visible, handling cookie prompts.
-
-    This is more reliable in headless mode where Zalando sometimes delays rendering
-    #main-content. We repeatedly try to dismiss the consent dialog and look for the
-    target selector within the overall DEFAULT_TIMEOUT window.
+    Dynamically adjusts delays between requests based on site responses
+    Increases delay on errors, decreases on success
     """
 
-    deadline = asyncio.get_running_loop().time() + (DEFAULT_TIMEOUT / 1000)
-    attempt = 1
+    def __init__(
+        self,
+        base_delay: float = 3.0,
+        max_delay: float = 60.0,
+        min_delay: float = 3.0,
+        jitter_max: float = 2.0,
+    ):
+        self.base_delay = base_delay
+        self.current_delay = base_delay
+        self.max_delay = max_delay
+        self.min_delay = min_delay
+        self.jitter_max = jitter_max
 
-    # Ensure basic DOM is ready
-    try:
-        await page.wait_for_load_state("domcontentloaded", timeout=8000)
-        await page.locator("body").wait_for(state="attached", timeout=8000)
-    except Exception:
-        pass
+        logger.info(
+            f"⏱️  Rate limiter initialized: base={base_delay}s, max={max_delay}s"
+        )
 
-    while asyncio.get_running_loop().time() < deadline:
-        dismissed_iframe = await _dismiss_cookie_iframe(page)
+    def get_delay(self) -> float:
+        """Get current delay with random jitter"""
+        jitter = random.uniform(0, self.jitter_max)
+        total = self.current_delay + jitter
+        logger.debug(
+            f"⏱️  Delay: {total:.2f}s (base: {self.current_delay:.2f}s + jitter: {jitter:.2f}s)"
+        )
+        return total
 
-        if consent_button_selector and not dismissed_iframe:
-            try:
-                consent_btn = page.locator(consent_button_selector)
-                if await consent_btn.count():
-                    if await consent_btn.is_visible(timeout=1000):
-                        logger.debug(
-                            "Consent button visible while waiting for main content."
-                        )
-                        await consent_btn.click(timeout=3000)
-                        await asyncio.sleep(0.5)
-            except Exception:
-                pass
+    async def wait(self):
+        """Apply rate limit delay"""
+        delay = self.get_delay()
+        await asyncio.sleep(delay)
 
-        # Nudge rendering in headless: small scroll can trigger lazy mounts
-        try:
-            await page.evaluate("() => window.scrollBy(0, 100)")
-        except Exception:
-            pass
+    def on_429(self):
+        """Triple delay on rate limit"""
+        old_delay = self.current_delay
+        self.current_delay = min(self.current_delay * 3.0, self.max_delay)
+        logger.warning(
+            f"🐌 Rate limit hit - delay: {old_delay:.1f}s → {self.current_delay:.1f}s"
+        )
 
-        locator = page.locator(MAIN_CONTENT_SELECTOR)
-        try:
-            await locator.wait_for(state="attached", timeout=2000)
-            if await locator.first.is_visible():
-                logger.debug("Main content is visible.")
-                return True
-            # If attached but hidden behind animation/popup, wait a bit and continue.
-            logger.debug("Main content attached but not yet visible; retrying...")
-        except Exception:
+    def on_403(self):
+        """Double delay on forbidden"""
+        old_delay = self.current_delay
+        self.current_delay = min(self.current_delay * 2.0, self.max_delay)
+        logger.warning(
+            f"🚫 403 Forbidden - delay: {old_delay:.1f}s → {self.current_delay:.1f}s"
+        )
+
+    def on_success(self):
+        """Decrease delay slightly on success"""
+        old_delay = self.current_delay
+        self.current_delay = max(self.current_delay * 0.9, self.min_delay)
+        if old_delay != self.current_delay:
             logger.debug(
-                f"Attempt {attempt}: main content not ready yet, retrying...",
-                exc_info=False,
+                f"✅ Success - delay: {old_delay:.1f}s → {self.current_delay:.1f}s"
             )
 
-        attempt += 1
-        await asyncio.sleep(1)
-
-    raise TimeoutError(
-        "Timed out waiting for Zalando #main-content to become available"
-    )
+    def reset(self):
+        """Reset to base delay"""
+        self.current_delay = self.base_delay
+        logger.info(f"⏱️  Rate limiter reset to {self.base_delay}s")
 
 
-# XPaths for pagination and product elements
-PAGINATION_XPATH = (
-    '//*[@id="main-content"]/div/div[5]/div/div[2]/div[3]/ul/li[85]/nav/div/span'
-)
-
-
-PRODUCTS_CONTAINER_XPATH = '//*[@id="main-content"]/div/div[5]/div/div[2]/div[3]/ul'
-
-# XPaths for product detail page
-BRAND_XPATH = '//*[@id="main-content"]/div[1]/div/div[2]/h1/div/a/span/span'
-PRODUCT_NAME_XPATH = '//*[@id="main-content"]/div[1]/div/div[2]/h1/span/span'
-IMAGES_CONTAINER_XPATH = (
-    '//*[@id="main-content"]/div[1]/div/div[1]/section/div[1]/div/div/div[2]/div[1]'
-)
-
-
-class ZalandoScraper(BatchProcessingMixin):
+class ProductDeduplicator:
     """
-    Zalando scraper wrapper class for integration with scraper manager.
-    Wraps the standalone scrape_zalando_shoes function.
+    Prevents re-scraping same products
+    Tracks by URL and by brand+name combination
     """
 
-    def __init__(self, base_url: str = "https://www.zalando.nl/schoenen"):
-        # Ensure we always use the correct .nl shoes page, not just zalando.com
-        if base_url and "zalando.com" in base_url and "zalando.nl" not in base_url:
-            logger.warning(
-                f"Correcting base_url from {base_url} to https://www.zalando.nl/schoenen"
+    def __init__(self):
+        self.seen_urls: Set[str] = set()
+        self.seen_products: Set[str] = set()
+
+    def is_duplicate_url(self, url: str) -> bool:
+        """Check if URL already scraped"""
+        return url in self.seen_urls
+
+    def is_duplicate_product(self, brand: str, name: str) -> bool:
+        """Check if product (brand+name) already scraped"""
+        product_key = self._make_product_key(brand, name)
+        return product_key in self.seen_products
+
+    def mark_url_seen(self, url: str):
+        """Mark URL as seen"""
+        self.seen_urls.add(url)
+
+    def mark_product_seen(self, brand: str, name: str):
+        """Mark product as seen"""
+        product_key = self._make_product_key(brand, name)
+        self.seen_products.add(product_key)
+
+    def _make_product_key(self, brand: str, name: str) -> str:
+        """Create unique key for brand+name"""
+        combined = f"{brand.lower().strip()}::{name.lower().strip()}"
+        return hashlib.md5(combined.encode()).hexdigest()
+
+    def get_stats(self) -> Dict[str, int]:
+        """Get deduplication statistics"""
+        return {
+            "unique_urls": len(self.seen_urls),
+            "unique_products": len(self.seen_products),
+        }
+
+
+class FailedUrlTracker:
+    """
+    Tracks and persists failed URLs for later retry
+    Separate files for blocked vs failed URLs
+    """
+
+    def __init__(self, failed_file: Path, blocked_file: Path):
+        self.failed_file = failed_file
+        self.blocked_file = blocked_file
+
+        self.failed_urls: List[FailedUrl] = []
+        self.blocked_urls: Set[str] = set()
+
+        # Load existing data
+        self._load_failed()
+        self._load_blocked()
+
+        logger.info(
+            f"📝 URL tracker initialized: "
+            f"{len(self.failed_urls)} failed, {len(self.blocked_urls)} blocked"
+        )
+
+    def is_blocked(self, url: str) -> bool:
+        """Check if URL is in blocklist"""
+        return url in self.blocked_urls
+
+    def add_failed(
+        self,
+        url: str,
+        reason: str,
+        status_code: Optional[int] = None,
+        retry_count: int = 0,
+        error_message: str = "",
+    ):
+        """Add failed URL to tracker"""
+        failed = FailedUrl(
+            url=url,
+            reason=reason,
+            status_code=status_code,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            retry_count=retry_count,
+            error_message=error_message,
+        )
+
+        self.failed_urls.append(failed)
+        self._save_failed()
+
+        logger.warning(f"❌ Failed URL recorded: {reason} - {url[:80]}")
+
+    def add_blocked(self, url: str, status_code: int):
+        """Add blocked URL (403/429) - will never retry"""
+        if url not in self.blocked_urls:
+            self.blocked_urls.add(url)
+            self._save_blocked()
+
+            # Also add to failed tracker
+            self.add_failed(
+                url=url,
+                reason=f"blocked_{status_code}",
+                status_code=status_code,
+                error_message=f"Permanently blocked with HTTP {status_code}",
             )
-            base_url = "https://www.zalando.nl/schoenen"
-        elif base_url and "zalando.nl" in base_url and "/schoenen" not in base_url:
-            # If it's zalando.nl but missing /schoenen, add it
-            base_url = "https://www.zalando.nl/schoenen"
 
+            logger.error(f"🚫 URL BLOCKED: HTTP {status_code} - {url[:80]}")
+
+    def _load_failed(self):
+        """Load failed URLs from file"""
+        if self.failed_file.exists():
+            try:
+                with open(self.failed_file, "r") as f:
+                    data = json.load(f)
+                    self.failed_urls = [FailedUrl(**item) for item in data]
+            except Exception as e:
+                logger.warning(f"Could not load failed URLs: {e}")
+
+    def _load_blocked(self):
+        """Load blocked URLs from file"""
+        if self.blocked_file.exists():
+            try:
+                with open(self.blocked_file, "r") as f:
+                    self.blocked_urls = set(json.load(f))
+            except Exception as e:
+                logger.warning(f"Could not load blocked URLs: {e}")
+
+    def _save_failed(self):
+        """Save failed URLs to file"""
+        try:
+            with open(self.failed_file, "w") as f:
+                json.dump([asdict(url) for url in self.failed_urls], f, indent=2)
+        except Exception as e:
+            logger.error(f"Could not save failed URLs: {e}")
+
+    def _save_blocked(self):
+        """Save blocked URLs to file"""
+        try:
+            with open(self.blocked_file, "w") as f:
+                json.dump(list(self.blocked_urls), f, indent=2)
+        except Exception as e:
+            logger.error(f"Could not save blocked URLs: {e}")
+
+    def get_stats(self) -> Dict[str, int]:
+        """Get tracker statistics"""
+        return {
+            "failed_urls": len(self.failed_urls),
+            "blocked_urls": len(self.blocked_urls),
+        }
+
+
+class CheckpointManager:
+    """
+    Manages scraping checkpoints for resume capability
+    Saves progress regularly and on shutdown
+    """
+
+    def __init__(self, checkpoint_file: Path):
+        self.checkpoint_file = checkpoint_file
+        self.start_time = time.time()
+
+        logger.info(f"💾 Checkpoint manager initialized: {checkpoint_file}")
+
+    def save(
+        self,
+        current_page: int,
+        products_scraped: int,
+        unique_products: int,
+        last_successful_index: int,
+        blocked_count: int,
+        failed_count: int,
+    ):
+        """Save checkpoint"""
+        checkpoint = Checkpoint(
+            current_page=current_page,
+            products_scraped=products_scraped,
+            unique_products=unique_products,
+            last_successful_index=last_successful_index,
+            blocked_urls_count=blocked_count,
+            failed_urls_count=failed_count,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            elapsed_seconds=time.time() - self.start_time,
+        )
+
+        try:
+            with open(self.checkpoint_file, "w") as f:
+                json.dump(asdict(checkpoint), f, indent=2)
+
+            logger.info(
+                f"💾 Checkpoint saved: page={current_page}, "
+                f"scraped={products_scraped}, unique={unique_products}"
+            )
+        except Exception as e:
+            logger.error(f"Could not save checkpoint: {e}")
+
+    def load(self) -> Optional[Checkpoint]:
+        """Load checkpoint if exists"""
+        if not self.checkpoint_file.exists():
+            return None
+
+        try:
+            with open(self.checkpoint_file, "r") as f:
+                data = json.load(f)
+                checkpoint = Checkpoint(**data)
+
+                logger.info(
+                    f"📂 Checkpoint loaded: page={checkpoint.current_page}, "
+                    f"scraped={checkpoint.products_scraped}"
+                )
+
+                return checkpoint
+        except Exception as e:
+            logger.warning(f"Could not load checkpoint: {e}")
+            return None
+
+
+class ResilientZalandoScraper(BatchProcessingMixin):
+    """
+    Production-grade Zalando scraper that NEVER HANGS
+
+    Key features:
+    - Circuit breaker prevents hammering blocked endpoints
+    - Adaptive rate limiting responds to site behavior
+    - Deduplication prevents re-scraping
+    - Failed URL tracking with persistent storage
+    - Checkpoint/resume for crash recovery
+    - Graceful shutdown with progress preservation
+    - Always makes forward progress
+    """
+
+    def __init__(
+        self,
+        base_url: str = "https://www.zalando.nl/schoenen",
+        config_path: Optional[Path] = None,
+    ):
         self.base_url = base_url
-        logger.info(f"Zalando scraper initialized with base_url: {self.base_url}")
+
+        # Load configuration
+        if config_path is None:
+            config_path = (
+                Path(__file__).parent / "config" / "zalando_scraper_config.json"
+            )
+
+        with open(config_path, "r") as f:
+            self.config = json.load(f)
+
+        # Initialize components
+        self.circuit_breaker = CircuitBreaker(
+            max_consecutive_403=self.config["circuit_breaker"]["max_consecutive_403"],
+            max_consecutive_429=self.config["circuit_breaker"]["max_consecutive_429"],
+            cooldown_seconds=self.config["circuit_breaker"]["cooldown_seconds"],
+        )
+
+        self.rate_limiter = AdaptiveRateLimiter(
+            base_delay=self.config["rate_limiting"]["base_delay"],
+            max_delay=self.config["rate_limiting"]["max_delay"],
+            min_delay=self.config["rate_limiting"]["min_delay"],
+            jitter_max=self.config["rate_limiting"]["random_jitter_max"],
+        )
+
+        self.deduplicator = ProductDeduplicator()
+
+        # File paths
+        scraper_dir = Path(__file__).parent
+        self.failed_tracker = FailedUrlTracker(
+            failed_file=scraper_dir / self.config["checkpointing"]["failed_urls_file"],
+            blocked_file=scraper_dir
+            / self.config["checkpointing"]["blocked_urls_file"],
+        )
+
+        self.checkpoint_manager = CheckpointManager(
+            checkpoint_file=scraper_dir
+            / self.config["checkpointing"]["checkpoint_file"]
+        )
+
+        # Statistics
+        self.stats = {
+            "products_scraped": 0,
+            "unique_products": 0,
+            "duplicates_skipped": 0,
+            "urls_blocked": 0,
+            "urls_failed": 0,
+            "pages_completed": 0,
+        }
+
+        # Shutdown flag
+        self.shutdown_requested = False
+        self._setup_signal_handlers()
+
+        logger.info("🚀 Resilient Zalando Scraper initialized")
+
+    def _setup_signal_handlers(self):
+        """Setup graceful shutdown handlers"""
+
+        def shutdown_handler(signum, frame):
+            logger.warning(
+                f"⚠️  Received signal {signum} - initiating graceful shutdown"
+            )
+            self.shutdown_requested = True
+
+        try:
+            signal.signal(signal.SIGTERM, shutdown_handler)
+            signal.signal(signal.SIGINT, shutdown_handler)
+        except Exception as e:
+            logger.warning(f"Could not setup signal handlers: {e}")
 
     async def scrape(
         self,
-        max_pages: int = None,
-        batch_callback=None,
-        batch_size: int = 20,
-        is_cancelled=None,
+        max_pages: Optional[int] = None,
+        batch_callback: Optional[Callable] = None,
+        batch_size: int = 50,
+        is_cancelled: Optional[Callable] = None,
     ):
         """
-        Scrape Zalando shoes with real-time batch processing support.
+        Main scraping method with full resilience
 
-        Args:
-            max_pages: Maximum number of pages to scrape (None = all pages)
-            batch_callback: Async function to call with each batch of products
-            batch_size: Number of products to collect before calling batch_callback
-            is_cancelled: Optional function to check if scraping should be cancelled
-
-        Process:
-        1. Launch browser and navigate to Zalando search
-        2. Process each page sequentially
-        3. For each page: extract product links → scrape products → batch process
-        4. Check uniqueness and insert into DB via batch_callback
+        GUARANTEES:
+        - Never hangs on blocked URLs
+        - Always makes forward progress
+        - Saves checkpoints regularly
+        - Handles shutdown gracefully
         """
-        if is_cancelled:
-            logger.info("🛑 Cancellation support enabled for this scraper")
+        logger.info("=" * 80)
+        logger.info("🎯 Starting resilient Zalando scrape")
+        logger.info("=" * 80)
 
-        logger.info("Starting Zalando scraper with real-time batch processing")
-        logger.info(f"Base URL: {self.base_url}")
+        # Load checkpoint if exists
+        checkpoint = self.checkpoint_manager.load()
+        start_page = checkpoint.current_page if checkpoint else 1
 
         results = []
         current_batch = []
-        should_stop = False
-        global_idx = 1
 
         async with async_playwright() as p:
-            # Launch browser with centralized configuration
-            browser, context, page = await launch_browser_context(p, headless=True)
-            consent_button_selector = CONSENT_BUTTON_SELECTOR
-
-            # Wire up verbose Playwright event logging so we can trace stuck requests
-            def _handle_console(msg):
-                try:
-                    logger.debug(f"[Console:{msg.type.lower()}] {msg.text}")
-                except Exception:
-                    pass
-
-            def _handle_request_failed(request):
-                try:
-                    # Suppress logging for intentionally blocked tracker/ads
-                    from urllib.parse import urlparse
-
-                    host = urlparse(request.url).netloc
-                    suppress_hosts = {
-                        "googleads.g.doubleclick.net",
-                        "ad.doubleclick.net",
-                        "www.googletagmanager.com",
-                        "www.google.com",
-                        "www.google.nl",
-                        "o4509038451032064.ingest.de.sentry.io",
-                        "app.eu.usercentrics.eu",
-                    }
-                    if host in suppress_hosts:
-                        return
-
-                    failure = request.failure
-                    logger.warning(
-                        f"Request failed: {request.method} {request.url} -> {failure}"
-                    )
-                except Exception:
-                    pass
-
-            def _handle_response(response):
-                try:
-                    if response.status >= 400:
-                        logger.warning(
-                            f"HTTP {response.status} for {response.request.method} {response.url}"
-                        )
-                except Exception:
-                    pass
-
-            page.on("console", _handle_console)
-            page.on("requestfailed", _handle_request_failed)
-            page.on("response", _handle_response)
+            # Launch browser with stealth
+            browser, context, page = await self._launch_stealth_browser(p)
 
             try:
-                # Navigate to base URL with retry logic
-                logger.info(f"Navigating to {self.base_url}")
-                for attempt in range(MAX_RETRIES):
-                    try:
-                        logger.debug(
-                            f"[Attempt {attempt + 1}/{MAX_RETRIES}] goto {self.base_url} "
-                            f"(wait_until='load', timeout={NAVIGATION_TIMEOUT}ms)"
-                        )
-                        await page.goto(
-                            self.base_url,
-                            wait_until="domcontentloaded",
-                            timeout=NAVIGATION_TIMEOUT,
-                        )
-                        logger.debug(
-                            f"Page loaded. Current URL: {page.url} | Title: {await page.title()}"
-                        )
-                        # Handle cookie consent overlay (appears frequently on Zalando)
-                        try:
-                            consent_btn = page.locator(consent_button_selector)
-                            if await consent_btn.is_visible(timeout=2000):
-                                logger.info(
-                                    "Clicking Zalando cookie consent button (base page)"
-                                )
-                                await consent_btn.click(timeout=5000)
-                                await asyncio.sleep(1)
-                        except Exception:
-                            logger.debug(
-                                "Cookie consent button not found or already dismissed"
-                            )
-                        await wait_for_main_content(page, consent_button_selector)
-                        # Persist storage state (cookies) after first success
-                        try:
-                            STORAGE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-                            await page.context.storage_state(
-                                path=str(STORAGE_STATE_PATH)
-                            )
-                        except Exception:
-                            pass
-                        logger.debug("#main-content detected; proceeding with scrape")
-                        break
-                    except Exception as e:
-                        if attempt < MAX_RETRIES - 1:
-                            logger.warning(
-                                f"Navigation attempt {attempt + 1} failed "
-                                f"({type(e).__name__}: {e}). Retrying after {RETRY_DELAY}s..."
-                            )
-                            try:
-                                logger.debug(
-                                    f"Page URL after failure: {page.url} "
-                                    f"| response status unknown (timeout before load)"
-                                )
-                            except Exception:
-                                pass
-                            await asyncio.sleep(RETRY_DELAY)
-                        else:
-                            logger.error(
-                                f"Failed to navigate after {MAX_RETRIES} attempts"
-                            )
-                            raise
+                # Navigate to base URL
+                await self._navigate_with_retry(page, self.base_url)
 
                 # Get total pages
-                total_pages = await get_pagination_info(page)
+                total_pages = await self._get_total_pages(page)
                 pages_to_scrape = (
                     min(total_pages, max_pages) if max_pages else total_pages
                 )
 
-                logger.info(f"🧭 Detected {total_pages} total pages")
-                logger.info(f"📄 Will scrape {pages_to_scrape} pages")
+                logger.info(f"📄 Will scrape pages {start_page} to {pages_to_scrape}")
 
-                # Process each page sequentially
-                for page_num in range(1, pages_to_scrape + 1):
-                    if should_stop:
+                # Main scraping loop
+                for page_num in range(start_page, pages_to_scrape + 1):
+                    # Check for shutdown or cancellation
+                    if self.shutdown_requested or (is_cancelled and is_cancelled()):
+                        logger.warning(
+                            "🛑 Shutdown requested - saving progress and exiting"
+                        )
                         break
 
-                    logger.info(f"\n📄 Loading page {page_num}/{pages_to_scrape}...")
+                    # Check circuit breaker
+                    if not self.circuit_breaker.check_and_wait():
+                        logger.warning(
+                            "⏸️  Circuit breaker active - waiting for cooldown"
+                        )
+                        await asyncio.sleep(self.circuit_breaker.cooldown_seconds)
 
-                    # Navigate to page with retry
-                    page_url = f"{self.base_url}?p={page_num}"
-                    for attempt in range(MAX_RETRIES):
-                        try:
-                            response = await page.goto(
-                                page_url,
-                                wait_until="domcontentloaded",
-                                timeout=NAVIGATION_TIMEOUT,
-                            )
-                            try:
-                                if response and response.status == 403:
-                                    logger.warning(
-                                        f"HTTP 403 for GET {page_url} — backing off"
-                                    )
-                                    await asyncio.sleep(RETRY_DELAY * (attempt + 1))
-                                    raise Exception("403 Forbidden")
-                            except Exception:
-                                pass
-
-                            try:
-                                consent_btn = page.locator(consent_button_selector)
-                                if await consent_btn.is_visible(timeout=2000):
-                                    logger.info(
-                                        f"Clicking cookie consent button on page {page_num}"
-                                    )
-                                    await consent_btn.click(timeout=5000)
-                                    await asyncio.sleep(1)
-                            except Exception:
-                                pass
-                            await wait_for_main_content(page, consent_button_selector)
-                            break
-                        except Exception as e:
-                            if attempt < MAX_RETRIES - 1:
-                                logger.warning(
-                                    f"Page load attempt {attempt + 1} failed: {e}. Retrying..."
-                                )
-                                await asyncio.sleep(RETRY_DELAY)
-                            else:
-                                logger.error(f"Failed to load page {page_num}")
-                                break
-
-                    # Get product links from current page
-                    product_links = await get_product_links(page)
-                    logger.info(
-                        f"🔗 Page {page_num}: Found {len(product_links)} product links"
-                    )
-
-                    if not product_links:
-                        logger.warning(f"No product links found on page {page_num}")
+                        # Reset context after cooldown
+                        await context.close()
+                        context = await self._create_new_context(browser)
+                        page = await context.new_page()
+                        self.rate_limiter.reset()
                         continue
 
-                    # Extract and process each product on this page
-                    for local_idx, product_url in enumerate(product_links, 1):
-                        # Check for cancellation
-                        if is_cancelled and is_cancelled():
+                    logger.info(f"\n{'=' * 80}")
+                    logger.info(f"📄 PAGE {page_num}/{pages_to_scrape}")
+                    logger.info(f"{'=' * 80}")
+
+                    # Navigate to page
+                    page_url = f"{self.base_url}?p={page_num}"
+                    nav_success = await self._navigate_with_retry(page, page_url)
+
+                    if not nav_success:
+                        logger.error(f"❌ Could not load page {page_num} - skipping")
+                        continue
+
+                    # Get product links
+                    product_links = await self._extract_product_links(page)
+
+                    if not product_links:
+                        logger.warning(f"⚠️  No products found on page {page_num}")
+                        continue
+
+                    logger.info(f"🔗 Found {len(product_links)} product links")
+
+                    # Scrape each product
+                    for idx, product_url in enumerate(product_links, 1):
+                        # Check shutdown
+                        if self.shutdown_requested or (is_cancelled and is_cancelled()):
+                            break
+
+                        # Check circuit breaker before each product
+                        if not self.circuit_breaker.check_and_wait():
                             logger.warning(
-                                "🛑 Cancellation detected - stopping scraper immediately"
+                                "🔴 Circuit breaker tripped - saving and pausing"
                             )
-                            should_stop = True
-                            break
+                            self._save_checkpoint(page_num, idx)
+                            await asyncio.sleep(self.circuit_breaker.cooldown_seconds)
 
-                        if should_stop:
-                            break
-
-                        try:
-                            logger.info(
-                                f"\n  Product {global_idx} (Page {page_num}:{local_idx}/{len(product_links)}): Scraping..."
-                            )
-
-                            details = await extract_product_details(page, product_url)
-
-                            if details and details.get("sole_image_url"):
-                                # Normalize to expected format
-                                normalized_product = {
-                                    "brand": details.get("brand", "Unknown"),
-                                    "name": details.get("name", "Unknown"),
-                                    "url": details.get("source_url", ""),
-                                    "image_url": details.get("sole_image_url", ""),
-                                    "product_type": "shoe",
-                                }
-
-                                # Log scraped product
-                                logger.info(f"✅ Scraped Product #{global_idx}:")
-                                logger.info(f"   Brand: {normalized_product['brand']}")
-                                logger.info(
-                                    f"   Product Name: {normalized_product['name']}"
-                                )
-                                logger.info(
-                                    f"   Product URL: {normalized_product['url']}"
-                                )
-                                sole_url = normalized_product["image_url"]
-                                logger.info(
-                                    f"   Sole Image URL: {sole_url[:80] + '...' if len(sole_url) > 80 else sole_url}"
-                                )
-                                logger.info(
-                                    f"   Total Images Found: {details.get('image_count', 0)}"
-                                )
-
-                                results.append(normalized_product)
-                                current_batch.append(normalized_product)
-
-                                # Process batch when reaching batch_size
-                                if len(current_batch) >= batch_size and batch_callback:
-                                    logger.info(
-                                        f"Processing batch of {len(current_batch)} products..."
-                                    )
-                                    prepared_batch = self._prepare_batch_for_processing(
-                                        current_batch,
-                                        brand_field="brand",
-                                        name_field="name",
-                                        url_field="url",
-                                        image_url_field="image_url",
-                                    )
-
-                                    if prepared_batch:
-                                        should_continue = await batch_callback(
-                                            prepared_batch
-                                        )
-                                        if not should_continue:
-                                            logger.info(
-                                                "Batch callback returned False, stopping"
-                                            )
-                                            should_stop = True
-
-                                    current_batch = []
-
-                            global_idx += 1
-                            await asyncio.sleep(1)  # Small delay between requests
-
-                        except Exception as e:
-                            logger.error(
-                                f"[Page {page_num}:Product {global_idx}] Failed to extract {product_url}: {e}"
-                            )
-                            global_idx += 1
+                            # Reset after cooldown
+                            await context.close()
+                            context = await self._create_new_context(browser)
+                            page = await context.new_page()
+                            self.rate_limiter.reset()
+                            self.circuit_breaker.reset()
                             continue
 
-                    # Pause between pages
-                    await asyncio.sleep(2)
+                        # Check if blocked
+                        if self.failed_tracker.is_blocked(product_url):
+                            logger.info(
+                                f"⏭️  Product {idx}: BLOCKED (in blocklist) - skipping"
+                            )
+                            continue
 
-                # Process remaining items in final batch
-                if current_batch and batch_callback and not should_stop:
-                    logger.info(
-                        f"Processing final batch of {len(current_batch)} products..."
-                    )
-                    prepared_batch = self._prepare_batch_for_processing(
+                        # Check if duplicate URL
+                        if self.deduplicator.is_duplicate_url(product_url):
+                            logger.info(f"⏭️  Product {idx}: DUPLICATE URL - skipping")
+                            self.stats["duplicates_skipped"] += 1
+                            continue
+
+                        # Mark URL as seen
+                        self.deduplicator.mark_url_seen(product_url)
+
+                        # Apply rate limiting
+                        await self.rate_limiter.wait()
+
+                        # Scrape product
+                        logger.info(
+                            f"\n🔍 Product {idx}/{len(product_links)}: Scraping..."
+                        )
+                        product = await self._scrape_product_resilient(
+                            page, product_url, idx
+                        )
+
+                        if product:
+                            # Check for duplicate product by name
+                            if self.deduplicator.is_duplicate_product(
+                                product.get("brand", ""), product.get("name", "")
+                            ):
+                                logger.info(
+                                    f"⏭️  Product {idx}: DUPLICATE PRODUCT - skipping"
+                                )
+                                self.stats["duplicates_skipped"] += 1
+                                continue
+
+                            # Mark product as seen
+                            self.deduplicator.mark_product_seen(
+                                product.get("brand", ""), product.get("name", "")
+                            )
+
+                            results.append(product)
+                            current_batch.append(product)
+                            self.stats["products_scraped"] += 1
+                            self.stats["unique_products"] += 1
+
+                            logger.info(
+                                f"✅ Product {idx}: SUCCESS - {product['brand']} - {product['name']}"
+                            )
+
+                            # Process batch
+                            if len(current_batch) >= batch_size and batch_callback:
+                                prepared = self._prepare_batch_for_processing(
+                                    current_batch,
+                                    brand_field="brand",
+                                    name_field="name",
+                                    url_field="url",
+                                    image_url_field="image_url",
+                                )
+
+                                if prepared:
+                                    should_continue = await batch_callback(prepared)
+                                    if not should_continue:
+                                        logger.warning(
+                                            "🛑 Batch callback returned False - stopping"
+                                        )
+                                        self.shutdown_requested = True
+                                        break
+
+                                current_batch = []
+
+                            # Save checkpoint periodically
+                            if (
+                                self.stats["products_scraped"]
+                                % self.config["checkpointing"]["save_every_n_products"]
+                                == 0
+                            ):
+                                self._save_checkpoint(page_num, idx)
+
+                        else:
+                            logger.warning(f"❌ Product {idx}: FAILED")
+
+                    self.stats["pages_completed"] += 1
+
+                    # Save checkpoint after each page
+                    self._save_checkpoint(page_num, len(product_links))
+
+                # Process final batch
+                if current_batch and batch_callback and not self.shutdown_requested:
+                    prepared = self._prepare_batch_for_processing(
                         current_batch,
                         brand_field="brand",
                         name_field="name",
@@ -707,393 +749,400 @@ class ZalandoScraper(BatchProcessingMixin):
                         image_url_field="image_url",
                     )
 
-                    if prepared_batch:
-                        await batch_callback(prepared_batch)
+                    if prepared:
+                        await batch_callback(prepared)
 
-                logger.info(f"✅ Scraped {len(results)} products with sole images")
-
-            except Exception as e:
-                logger.error(f"Scraper failed: {e}", exc_info=True)
             finally:
-                await browser.close()
+                # Always cleanup
+                try:
+                    await context.close()
+                    await browser.close()
+                except Exception:
+                    pass
+
+                # Final checkpoint
+                self._save_checkpoint(pages_to_scrape, 0)
+
+                # Print final statistics
+                self._print_final_stats()
 
         return results
 
+    async def _scrape_product_resilient(
+        self, page: Page, url: str, product_index: int
+    ) -> Optional[Dict]:
+        """
+        Scrape single product with full error handling
+        NEVER HANGS - Always returns (success or failure) within timeout
+        """
+        max_retries = self.config["retries"]["max_per_url"]
 
-async def get_pagination_info(page: Page) -> int:
-    """
-    Extract total page count from pagination element.
-    Expected format: "Pagina 1 van 428" -> returns 428
-    Falls back to checking page content if XPath fails.
-    """
-    try:
-        # Try XPath first
-        try:
-            pagination_text = await page.text_content(PAGINATION_XPATH, timeout=5000)
-            if pagination_text:
-                parts = pagination_text.strip().split("van ")
-                if len(parts) == 2:
-                    total_pages = int(parts[1].strip())
-                    logger.info(f"Found {total_pages} total pages")
-                    return total_pages
-        except Exception as e:
-            logger.debug(f"XPath pagination failed, trying alternative method: {e}")
-
-        # Fallback: look for pagination text anywhere on page
-        page_content = await page.content()
-        if "van" in page_content:
-            # Try to find pattern like "Pagina 1 van 428"
-            import re
-
-            match = re.search(r"Pagina\s+\d+\s+van\s+(\d+)", page_content)
-            if match:
-                total_pages = int(match.group(1))
-                logger.info(f"Found {total_pages} total pages (via regex)")
-                return total_pages
-    except Exception as e:
-        logger.warning(f"Failed to extract pagination info: {e}")
-
-    logger.info("Using default: 1 page")
-    return 1
-
-
-async def get_product_links(page: Page) -> List[str]:
-    """
-    Extract product links from the current page.
-    Finds all <a> tags with href containing product URLs inside the products container.
-    """
-    try:
-        # Try XPath container first, then fallback to CSS in main-content
-        try:
-            await page.locator(PRODUCTS_CONTAINER_XPATH).first.wait_for(timeout=8000)
-            links = await page.locator(
-                f'{PRODUCTS_CONTAINER_XPATH}//a[contains(@href, ".html")]'
-            ).all()
-        except Exception:
-            await page.locator("#main-content").first.wait_for(timeout=8000)
-            links = await page.locator('#main-content a[href*=".html"]').all()
-        product_links = []
-
-        for link in links:
-            href = await link.get_attribute("href")
-            if href and ".html" in href:
-                # Ensure absolute URL
-                if href.startswith("http"):
-                    product_links.append(href)
-                else:
-                    product_links.append(f"https://www.zalando.nl{href}")
-
-        logger.info(f"Found {len(product_links)} product links on this page")
-        return product_links
-    except Exception as e:
-        logger.error(f"Failed to extract product links: {e}")
-        return []
-
-
-async def get_product_images(page: Page) -> List[Dict[str, str]]:
-    """
-    Extract all image URLs and their alt text from the images container on current product page.
-    Returns a list of dictionaries: {"url": absolute_url, "alt": alt_text}
-    """
-    try:
-        images = await page.locator(f"{IMAGES_CONTAINER_XPATH}//img").all()
-        entries: List[Dict[str, str]] = []
-
-        for img in images:
+        for attempt in range(1, max_retries + 1):
             try:
-                # Try srcset first (responsive images), then src
-                srcset = await img.get_attribute("srcset")
-                src = await img.get_attribute("src")
-                alt = await img.get_attribute("alt") or ""
+                # Navigate with timeout
+                logger.debug(
+                    f"  Attempt {attempt}/{max_retries}: Navigating to {url[:80]}"
+                )
 
-                url = None
-                if srcset:
-                    # Extract first URL from srcset
-                    url = srcset.split(",")[0].split()[0]
-                elif src:
-                    url = src
+                response = await page.goto(
+                    url,
+                    wait_until="domcontentloaded",
+                    timeout=self.config["timeouts"]["page_load"],
+                )
 
-                if url and url.startswith("http"):
-                    entries.append({"url": url, "alt": alt})
+                # Check response status
+                if response:
+                    status = response.status
+
+                    # Handle blocking responses
+                    if status == 403:
+                        self.failed_tracker.add_blocked(url, 403)
+                        self.circuit_breaker.record_403()
+                        self.rate_limiter.on_403()
+                        self.stats["urls_blocked"] += 1
+                        logger.error(f"  🚫 HTTP 403 FORBIDDEN - URL BLOCKED")
+                        return None  # NEVER RETRY
+
+                    elif status == 429:
+                        self.failed_tracker.add_blocked(url, 429)
+                        self.circuit_breaker.record_429()
+                        self.rate_limiter.on_429()
+                        self.stats["urls_blocked"] += 1
+                        logger.error(f"  🚫 HTTP 429 RATE LIMITED - URL BLOCKED")
+                        return None  # NEVER RETRY
+
+                    elif status >= 500:
+                        logger.warning(f"  ⚠️  HTTP {status} Server Error")
+                        if attempt < max_retries:
+                            await asyncio.sleep(2)
+                            continue
+                        else:
+                            self.failed_tracker.add_failed(
+                                url, "server_error", status, attempt
+                            )
+                            return None
+
+                # Extract product details
+                product = await self._extract_product_details(page, url)
+
+                if not product or not product.get("sole_image_url"):
+                    logger.warning(f"  ⚠️  No data extracted")
+
+                    if attempt < max_retries:
+                        await asyncio.sleep(1)
+                        continue
+                    else:
+                        self.failed_tracker.add_failed(
+                            url,
+                            "no_data",
+                            None,
+                            attempt,
+                            "Could not extract product data",
+                        )
+                        self.stats["urls_failed"] += 1
+                        return None
+
+                # SUCCESS
+                self.circuit_breaker.record_success()
+                self.rate_limiter.on_success()
+                return product
+
+            except asyncio.TimeoutError:
+                logger.warning(f"  ⏱️  Timeout on attempt {attempt}")
+
+                if attempt < max_retries:
+                    continue
+                else:
+                    self.failed_tracker.add_failed(
+                        url, "timeout", None, attempt, "Page load timeout"
+                    )
+                    self.stats["urls_failed"] += 1
+                    return None
+
             except Exception as e:
-                logger.debug(f"Failed to extract image info: {e}")
-                continue
+                logger.error(f"  ❌ Error on attempt {attempt}: {e}")
 
-        logger.info(f"Found {len(entries)} product images (with alt text)")
-        return entries
-    except Exception as e:
-        logger.debug(f"Failed to extract product images: {e}")
-        return []
+                if attempt < max_retries:
+                    await asyncio.sleep(1)
+                    continue
+                else:
+                    self.failed_tracker.add_failed(
+                        url, "extraction_error", None, attempt, str(e)
+                    )
+                    self.stats["urls_failed"] += 1
+                    return None
 
-
-def find_shoe_sole_image(image_entries: List[Dict[str, str]]) -> str:
-    """
-    Identify shoe sole image by searching for keywords in the image alt text.
-
-    Accepts image_entries as returned by `get_product_images`: list of {"url","alt"}.
-
-    Returns the URL of the first image whose alt text contains a sole-related keyword
-    in English, Dutch, or German. Returns None if no match.
-    """
-    if not image_entries:
         return None
 
-    # Keywords in different languages (lowercase)
-    keywords = [
-        # English
-        "sole",
-        "outsole",
-        "bottom",
-        # Dutch
-        "zool",
-        "onderkant",
-        "onderzijde",
-        # German
-        "sohle",
-        "laufsohle",
-    ]
+    async def _navigate_with_retry(self, page: Page, url: str) -> bool:
+        """Navigate to URL with retry logic"""
+        max_retries = self.config["retries"]["max_per_page"]
 
-    for idx, entry in enumerate(image_entries):
-        alt = (entry.get("alt") or "").lower()
-        url = entry.get("url")
-        try:
-            if not alt:
-                # skip images without alt text
-                continue
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.debug(f"Navigating to {url} (attempt {attempt}/{max_retries})")
 
-            # Split by ',' and check only the first segment (index 0)
-            alt_parts = alt.split(",")
-            first_part = alt_parts[0].strip() if alt_parts else ""
-
-            if any(k in first_part for k in keywords):
-                logger.info(
-                    f"✓ Found shoe sole by alt (image {idx}): {url} (alt='{alt}')"
+                response = await page.goto(
+                    url,
+                    wait_until="domcontentloaded",
+                    timeout=self.config["timeouts"]["navigation"],
                 )
-                return url
-        except Exception as e:
-            logger.debug(f"Error checking alt for image {idx}: {e}")
-            continue
 
-    logger.warning("No shoe sole image detected via alt text in product images")
-    return None
+                if response and response.status < 400:
+                    # Wait for main content
+                    try:
+                        await page.wait_for_selector(
+                            "#main-content",
+                            timeout=self.config["timeouts"]["stuck_page_check"] * 1000,
+                        )
+                    except Exception:
+                        logger.warning("Main content not found quickly, but continuing")
 
+                    return True
 
-async def extract_product_details(page: Page, url: str) -> Dict[str, Any]:
-    """
-    Extract brand, product name, image count, and shoe sole image URL from a product detail page.
-    """
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT)
+                logger.warning(
+                    f"Navigation returned status {response.status if response else 'unknown'}"
+                )
 
-        # Wait for main content instead of networkidle
+                if attempt < max_retries:
+                    await asyncio.sleep(2)
+                    continue
+
+            except Exception as e:
+                logger.error(f"Navigation error: {e}")
+
+                if attempt < max_retries:
+                    await asyncio.sleep(2)
+                    continue
+
+        return False
+
+    async def _extract_product_links(self, page: Page) -> List[str]:
+        """Extract product links from listing page"""
         try:
-            await page.wait_for_selector("#main-content", timeout=DEFAULT_TIMEOUT)
-        except Exception:
-            pass  # Continue even if main-content doesn't load
-
-        await asyncio.sleep(1)  # Give page time to render
-
-        # Extract brand
-        brand = "Unknown"
-        try:
-            brand_elem = await page.locator(BRAND_XPATH).first.text_content(
-                timeout=5000
+            # Wait for products
+            await page.wait_for_selector(
+                'article[data-testid="product-card"]', timeout=10000
             )
-            brand = brand_elem.strip() if brand_elem else "Unknown"
+
+            # Extract links
+            links = await page.eval_on_selector_all(
+                'article[data-testid="product-card"] a',
+                """
+                elements => elements
+                    .map(el => el.href)
+                    .filter(href => href && href.includes('/schoenen'))
+                """,
+            )
+
+            # Deduplicate and validate
+            unique_links = list(
+                set([link for link in links if link and link.startswith("http")])
+            )
+
+            return unique_links
+
         except Exception as e:
-            logger.debug(f"Failed to extract brand: {e}")
+            logger.error(f"Error extracting product links: {e}")
+            return []
 
-        # Extract product name
-        product_name = "Unknown"
+    async def _extract_product_details(self, page: Page, url: str) -> Optional[Dict]:
+        """Extract product details from product page"""
         try:
-            name_elem = await page.locator(PRODUCT_NAME_XPATH).first.text_content(
-                timeout=5000
+            # Wait for product info
+            await page.wait_for_selector("h1", timeout=10000)
+
+            # Extract brand and name
+            brand = (
+                await page.eval_on_selector(
+                    'h1 a[href*="/"]', 'el => el ? el.textContent.trim() : "Unknown"'
+                )
+                or "Unknown"
             )
-            product_name = name_elem.strip() if name_elem else "Unknown"
+
+            name = (
+                await page.eval_on_selector(
+                    "h1 span:last-child", 'el => el ? el.textContent.trim() : "Unknown"'
+                )
+                or "Unknown"
+            )
+
+            # Extract images
+            image_urls = await page.eval_on_selector_all(
+                'img[src*="mosaic"]',
+                "elements => elements.map(el => el.src).filter(src => src)",
+            )
+
+            if not image_urls:
+                return None
+
+            # Find sole image (use last image as heuristic)
+            sole_image_url = image_urls[-1] if len(image_urls) > 1 else image_urls[0]
+
+            return {
+                "brand": brand,
+                "name": name,
+                "url": url,
+                "image_url": sole_image_url,
+                "product_type": "shoe",
+                "image_count": len(image_urls),
+            }
+
         except Exception as e:
-            logger.debug(f"Failed to extract product name: {e}")
+            logger.error(f"Error extracting product details: {e}")
+            return None
 
-        # Get product images
-        image_entries = await get_product_images(page)
-        image_count = len(image_entries)
-
-        # Find shoe sole image via alt text
-        sole_image_url = None
-        if image_entries:
-            logger.info(
-                f"Analyzing {image_count} images for shoe sole detection (alt-text)..."
+    async def _get_total_pages(self, page: Page) -> int:
+        """Get total number of pages"""
+        try:
+            # Try to find pagination
+            pagination_text = await page.eval_on_selector(
+                'nav[aria-label="pagination"] span', "el => el ? el.textContent : null"
             )
-            sole_image_url = find_shoe_sole_image(image_entries)
 
-        logger.info(
-            f"Extracted: {brand} - {product_name} ({image_count} images, sole: {'found' if sole_image_url else 'not found'})"
+            if pagination_text and "van" in pagination_text:
+                # Extract number after "van"
+                parts = pagination_text.split("van")
+                if len(parts) > 1:
+                    total = int(parts[1].strip())
+                    return total
+
+            # Fallback: assume 428 pages (known from previous runs)
+            return 428
+
+        except Exception as e:
+            logger.warning(f"Could not determine total pages: {e}, assuming 428")
+            return 428
+
+    async def _launch_stealth_browser(self, playwright):
+        """Launch browser with stealth configuration"""
+        user_agent = random.choice(self.config["stealth"]["user_agents"])
+        viewport = random.choice(self.config["stealth"]["viewports"])
+
+        browser = await playwright.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+            ],
         )
 
-        return {
-            "brand": brand,
-            "name": product_name,
-            "source_url": url,
-            "image_count": image_count,
-            "sole_image_url": sole_image_url,
-        }
-    except Exception as e:
-        logger.error(f"Failed to extract details from {url}: {e}")
-        return None
+        context = await browser.new_context(
+            user_agent=user_agent,
+            viewport=viewport,
+            locale="nl-NL",
+            timezone_id="Europe/Amsterdam",
+        )
+
+        # Add stealth scripts
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+        """)
+
+        page = await context.new_page()
+
+        # Setup request blocking
+        await self._setup_request_blocking(page)
+
+        page.set_default_timeout(self.config["timeouts"]["default"])
+        page.set_default_navigation_timeout(self.config["timeouts"]["navigation"])
+
+        return browser, context, page
+
+    async def _create_new_context(self, browser):
+        """Create new browser context with fresh settings"""
+        user_agent = random.choice(self.config["stealth"]["user_agents"])
+        viewport = random.choice(self.config["stealth"]["viewports"])
+
+        context = await browser.new_context(
+            user_agent=user_agent,
+            viewport=viewport,
+            locale="nl-NL",
+            timezone_id="Europe/Amsterdam",
+        )
+
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        """)
+
+        return context
+
+    async def _setup_request_blocking(self, page: Page):
+        """Block unnecessary requests to reduce detection"""
+        blocked_domains = self.config["blocking"]["domains"]
+        blocked_paths = self.config["blocking"]["paths"]
+
+        async def route_handler(route):
+            url = route.request.url
+
+            # Block by domain
+            if any(domain in url for domain in blocked_domains):
+                await route.abort()
+                return
+
+            # Block by path
+            if any(path in url for path in blocked_paths):
+                await route.abort()
+                return
+
+            # Block POST to analytics
+            if route.request.method == "POST" and "/api/" in url:
+                await route.abort()
+                return
+
+            await route.continue_()
+
+        await page.route("**/*", route_handler)
+
+    def _save_checkpoint(self, current_page: int, last_index: int):
+        """Save current progress checkpoint"""
+        self.checkpoint_manager.save(
+            current_page=current_page,
+            products_scraped=self.stats["products_scraped"],
+            unique_products=self.stats["unique_products"],
+            last_successful_index=last_index,
+            blocked_count=len(self.failed_tracker.blocked_urls),
+            failed_count=len(self.failed_tracker.failed_urls),
+        )
+
+    def _print_final_stats(self):
+        """Print final scraping statistics"""
+        logger.info("\n" + "=" * 80)
+        logger.info("📊 FINAL STATISTICS")
+        logger.info("=" * 80)
+        logger.info(f"✅ Products scraped: {self.stats['products_scraped']}")
+        logger.info(f"🎯 Unique products: {self.stats['unique_products']}")
+        logger.info(f"⏭️  Duplicates skipped: {self.stats['duplicates_skipped']}")
+        logger.info(f"🚫 URLs blocked: {self.stats['urls_blocked']}")
+        logger.info(f"❌ URLs failed: {self.stats['urls_failed']}")
+        logger.info(f"📄 Pages completed: {self.stats['pages_completed']}")
+        logger.info("=" * 80)
 
 
-async def scrape_zalando_shoes(
-    url: str = "https://www.zalando.nl/schoenen",
-    max_pages: int = None,
-    headless: bool = True,
-) -> List[Dict[str, Any]]:
+# Convenience function for direct usage
+async def scrape_zalando_resilient(
+    base_url: str = "https://www.zalando.nl/schoenen",
+    max_pages: Optional[int] = None,
+    config_path: Optional[Path] = None,
+) -> List[Dict]:
     """
-    Main scraper function.
+    Scrape Zalando with full resilience
 
     Args:
-        url: Starting URL (Zalando shoes page)
-        max_pages: Max pages to scrape (None = all pages)
-        headless: Run browser in headless mode
+        base_url: Starting URL
+        max_pages: Maximum pages to scrape (None = all)
+        config_path: Path to config file (uses default if None)
 
     Returns:
-        List of product dictionaries
+        List of scraped products
     """
-    products = []
-    consent_button_selector = CONSENT_BUTTON_SELECTOR
-
-    async with async_playwright() as p:
-        browser, context, page = await launch_browser_context(p, headless=headless)
-
-        try:
-            # Navigate to base URL with retry logic
-            logger.info(f"Navigating to {url}")
-            for attempt in range(MAX_RETRIES):
-                try:
-                    await page.goto(
-                        url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT
-                    )
-                    # Wait for main content to load
-                    await wait_for_main_content(page, consent_button_selector)
-                    # Persist storage after first successful visit
-                    try:
-                        STORAGE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-                        await page.context.storage_state(path=str(STORAGE_STATE_PATH))
-                    except Exception:
-                        pass
-                    break
-                except Exception as e:
-                    if attempt < MAX_RETRIES - 1:
-                        logger.warning(
-                            f"Navigation attempt {attempt + 1} failed: {e}. Retrying..."
-                        )
-                        await asyncio.sleep(RETRY_DELAY)
-                    else:
-                        logger.error(f"Failed to navigate after {MAX_RETRIES} attempts")
-                        raise
-
-            # Get total pages
-            total_pages = await get_pagination_info(page)
-            pages_to_scrape = min(total_pages, max_pages) if max_pages else total_pages
-
-            logger.info(f"Will scrape {pages_to_scrape} pages")
-
-            for page_num in range(1, pages_to_scrape + 1):
-                logger.info(f"\n--- Page {page_num} of {pages_to_scrape} ---")
-
-                # Navigate to page with retry
-                page_url = f"{url}?p={page_num}"
-                for attempt in range(MAX_RETRIES):
-                    try:
-                        await page.goto(
-                            page_url,
-                            wait_until="domcontentloaded",
-                            timeout=NAVIGATION_TIMEOUT,
-                        )
-                        await wait_for_main_content(page, consent_button_selector)
-                        break
-                    except Exception as e:
-                        if attempt < MAX_RETRIES - 1:
-                            logger.warning(
-                                f"Page load attempt {attempt + 1} failed: {e}. Retrying..."
-                            )
-                            await asyncio.sleep(RETRY_DELAY)
-                        else:
-                            logger.error(f"Failed to load page {page_num}")
-                            break
-
-                # Get product links from this page
-                product_links = await get_product_links(page)
-
-                if not product_links:
-                    logger.warning(f"No product links found on page {page_num}")
-
-                # Extract details from each product
-                for idx, product_url in enumerate(product_links, 1):
-                    logger.info(f"  Product {idx}/{len(product_links)}: {product_url}")
-                    details = await extract_product_details(page, product_url)
-                    if details:
-                        products.append(details)
-                    await asyncio.sleep(1)  # Small delay between product requests
-
-                # Pause between pages
-                await asyncio.sleep(2)
-
-            logger.info(f"\n✓ Scraping complete. Total products: {len(products)}")
-
-        except Exception as e:
-            logger.error(f"Scraping failed: {e}")
-        finally:
-            await browser.close()
-
-    return products
-
-
-def print_products_summary(products: List[Dict[str, Any]]):
-    """Print a summary of scraped products."""
-    print("\n" + "=" * 120)
-    print("SCRAPE SUMMARY - ZALANDO SHOES WITH SOLE DETECTION")
-    print("=" * 120)
-    for idx, p in enumerate(products, 1):
-        print(f"\n{idx}. {p['brand']} - {p['name']}")
-        print(f"   URL: {p['source_url']}")
-        print(f"   Images: {p['image_count']}")
-        if p.get("sole_image_url"):
-            print(f"   ✓ Sole Image: {p['sole_image_url']}")
-        else:
-            print("   ✗ Sole Image: Not detected")
-        print("-" * 120)
-
-    print(f"\nTotal Products Scraped: {len(products)}")
-    sole_detected = sum(1 for p in products if p.get("sole_image_url"))
-    print(f"Products with Sole Images: {sole_detected}/{len(products)}")
-
-
-def save_products_to_json(products: List[Dict[str, Any]], output_path: str):
-    """Save products to JSON file."""
-    output_file = Path(output_path)
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(products, f, indent=2, ensure_ascii=False)
-
-    logger.info(f"Saved {len(products)} products to {output_file}")
-
-
-async def main():
-    """Main entry point."""
-    # Scrape first 2 pages (or set to None for all pages)
-    products = await scrape_zalando_shoes(
-        url="https://www.zalando.nl/schoenen",
-        max_pages=None,
-        headless=True,  # Set to True for headless mode
-    )
-
-    # Print summary
-    print_products_summary(products)
-
-    # Save to JSON
-    output_path = Path(__file__).parent.parent / "data" / "zalando_shoes.json"
-    save_products_to_json(products, str(output_path))
+    scraper = ResilientZalandoScraper(base_url, config_path)
+    return await scraper.scrape(max_pages=max_pages)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Test scraping
+    asyncio.run(scrape_zalando_resilient(max_pages=5))
