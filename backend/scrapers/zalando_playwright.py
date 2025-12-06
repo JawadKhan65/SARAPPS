@@ -43,11 +43,14 @@ NAVIGATION_TIMEOUT = 90000  # 90 seconds for page navigation
 MAX_RETRIES = 3
 RETRY_DELAY = 3  # seconds between retries
 
-# Scraping delays to appear human-like
-MIN_PRODUCT_DELAY = 3  # minimum seconds between products
-MAX_PRODUCT_DELAY = 8  # maximum seconds between products
-MIN_PAGE_DELAY = 10  # minimum seconds between pages
-MAX_PAGE_DELAY = 20  # maximum seconds between pages
+# Scraping delays to appear human-like (loaded from config or env vars)
+# These are defaults - actual values loaded from Config in __init__
+MIN_PRODUCT_DELAY = 28  # minimum seconds between products
+MAX_PRODUCT_DELAY = 35  # maximum seconds between products
+MIN_PAGE_DELAY = 28  # minimum seconds between pages
+MAX_PAGE_DELAY = 35  # maximum seconds between pages
+PROXY_ROTATION_INTERVAL = 15  # Rotate proxy every N products
+SESSION_RESTART_INTERVAL = 50  # Restart browser every N products
 BACKOFF_MULTIPLIER = 2  # exponential backoff multiplier on failures
 MAIN_CONTENT_SELECTOR = "#main-content"
 CONSENT_BUTTON_SELECTOR = '[data-testid="uc-accept-all-button"]'
@@ -660,6 +663,47 @@ class ZalandoScraper(BatchProcessingMixin):
 
         self.base_url = base_url
 
+        # Load configuration from Config class (if available)
+        try:
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+            from core.config.config import Config
+
+            self.min_product_delay = Config.ZALANDO_MIN_PRODUCT_DELAY
+            self.max_product_delay = Config.ZALANDO_MAX_PRODUCT_DELAY
+            self.min_page_delay = Config.ZALANDO_MIN_PAGE_DELAY
+            self.max_page_delay = Config.ZALANDO_MAX_PAGE_DELAY
+            self.proxy_rotation_interval = Config.ZALANDO_PROXY_ROTATION_INTERVAL
+            self.session_restart_interval = Config.ZALANDO_SESSION_RESTART_INTERVAL
+            self.max_retries_per_product = Config.ZALANDO_MAX_RETRIES_PER_PRODUCT
+
+            # Override enable_proxy_rotation from config if not explicitly set
+            if enable_proxy_rotation is None and hasattr(
+                Config, "ZALANDO_ENABLE_PROXIES"
+            ):
+                enable_proxy_rotation = Config.ZALANDO_ENABLE_PROXIES
+
+            logger.info("✅ Loaded Zalando scraper configuration from Config")
+            logger.info(
+                f"   Product delays: {self.min_product_delay}-{self.max_product_delay}s"
+            )
+            logger.info(f"   Page delays: {self.min_page_delay}-{self.max_page_delay}s")
+            logger.info(
+                f"   Proxy rotation: every {self.proxy_rotation_interval} products"
+            )
+            logger.info(
+                f"   Session restart: every {self.session_restart_interval} products"
+            )
+        except Exception as e:
+            # Fallback to module-level defaults
+            logger.warning(f"Could not load config, using defaults: {e}")
+            self.min_product_delay = MIN_PRODUCT_DELAY
+            self.max_product_delay = MAX_PRODUCT_DELAY
+            self.min_page_delay = MIN_PAGE_DELAY
+            self.max_page_delay = MAX_PAGE_DELAY
+            self.proxy_rotation_interval = PROXY_ROTATION_INTERVAL
+            self.session_restart_interval = SESSION_RESTART_INTERVAL
+            self.max_retries_per_product = 3
+
         # Auto-enable proxy rotation if proxies.json exists (unless explicitly disabled)
         if enable_proxy_rotation is None:
             # Check if proxies.json exists
@@ -917,19 +961,103 @@ class ZalandoScraper(BatchProcessingMixin):
                             )
 
                             # Add random delay before each product to appear human-like
-                            await random_delay(MIN_PRODUCT_DELAY, MAX_PRODUCT_DELAY)
-
-                            start_time = asyncio.get_running_loop().time()
-                            details = await extract_product_details(page, product_url)
-                            response_time = (
-                                asyncio.get_running_loop().time() - start_time
+                            await random_delay(
+                                self.min_product_delay, self.max_product_delay
                             )
 
-                            if details and details.get("sole_image_url"):
-                                # Record success for current proxy
-                                if current_proxy:
-                                    current_proxy.record_success(response_time)
+                            # Retry logic with proxy rotation on failure
+                            details = None
+                            retry_attempt = 0
 
+                            while retry_attempt <= self.max_retries_per_product:
+                                try:
+                                    start_time = asyncio.get_running_loop().time()
+                                    details = await extract_product_details(
+                                        page, product_url
+                                    )
+                                    response_time = (
+                                        asyncio.get_running_loop().time() - start_time
+                                    )
+
+                                    # Success - record it and break
+                                    if current_proxy:
+                                        current_proxy.record_success(response_time)
+                                    break
+
+                                except Exception as extract_error:
+                                    error_str = str(extract_error)
+                                    is_blocking = (
+                                        "403" in error_str
+                                        or "blocked" in error_str.lower()
+                                        or "denied" in error_str.lower()
+                                    )
+
+                                    if (
+                                        is_blocking
+                                        and retry_attempt < self.max_retries_per_product
+                                        and self.proxy_manager.enable_rotation
+                                    ):
+                                        retry_attempt += 1
+                                        logger.warning(
+                                            f"Product extraction failed (attempt {retry_attempt}/{self.max_retries_per_product + 1}): {extract_error}"
+                                        )
+                                        logger.info(
+                                            "🔄 Rotating proxy and restarting browser..."
+                                        )
+
+                                        # Close current browser
+                                        try:
+                                            await page.close()
+                                            await context.close()
+                                            await browser.close()
+                                        except Exception:
+                                            pass
+
+                                        # Get new proxy
+                                        current_proxy = (
+                                            self.proxy_manager.rotate_on_failure(
+                                                current_proxy
+                                            )
+                                        )
+                                        if not current_proxy:
+                                            logger.error(
+                                                "No more active proxies available"
+                                            )
+                                            raise Exception("No proxies available")
+
+                                        # Wait before restart
+                                        await exponential_backoff_delay(
+                                            retry_attempt, base_delay=10.0
+                                        )
+
+                                        # Restart browser with new proxy
+                                        (
+                                            browser,
+                                            context,
+                                            page,
+                                        ) = await launch_browser_context(
+                                            p, headless=True, proxy=current_proxy
+                                        )
+                                        page.on("console", _handle_console)
+                                        page.on("requestfailed", _handle_request_failed)
+                                        page.on("response", _handle_response)
+
+                                        logger.info(
+                                            f"✅ Browser restarted with proxy {current_proxy.host}:{current_proxy.port}"
+                                        )
+                                        continue
+                                    else:
+                                        # Non-blocking error or retries exhausted
+                                        raise extract_error
+
+                            if not details:
+                                raise Exception(
+                                    "Failed to extract product details after retries"
+                                )
+
+                            response_time = 0.0
+
+                            if details and details.get("sole_image_url"):
                                 # Normalize to expected format
                                 normalized_product = {
                                     "brand": details.get("brand", "Unknown"),
@@ -983,6 +1111,76 @@ class ZalandoScraper(BatchProcessingMixin):
                                             should_stop = True
 
                                     current_batch = []
+
+                            # Periodic session restart for enhanced anti-detection
+                            # Restart entire browser session to reset fingerprint
+                            if global_idx % self.session_restart_interval == 0:
+                                logger.info(
+                                    f"🔄 Periodic session restart after {global_idx} products (anti-fingerprinting)"
+                                )
+                                try:
+                                    await page.close()
+                                    await context.close()
+                                    await browser.close()
+                                except Exception:
+                                    pass
+
+                                # Get next proxy (if enabled)
+                                if self.proxy_manager.enable_rotation:
+                                    current_proxy = self.proxy_manager.get_next_proxy()
+
+                                # Restart browser with fresh session
+                                browser, context, page = await launch_browser_context(
+                                    p, headless=True, proxy=current_proxy
+                                )
+                                page.on("console", _handle_console)
+                                page.on("requestfailed", _handle_request_failed)
+                                page.on("response", _handle_response)
+
+                                if current_proxy:
+                                    logger.info(
+                                        f"✅ Session restarted with proxy {current_proxy.host}:{current_proxy.port}"
+                                    )
+                                else:
+                                    logger.info(f"✅ Session restarted (no proxy)")
+
+                                # Longer pause after session restart
+                                await asyncio.sleep(random.uniform(5, 10))
+
+                            # Proactive proxy rotation (without browser restart)
+                            elif (
+                                self.proxy_manager.enable_rotation
+                                and global_idx % self.proxy_rotation_interval == 0
+                            ):
+                                logger.info(
+                                    f"🔄 Proactive proxy rotation after {global_idx} products"
+                                )
+                                try:
+                                    await page.close()
+                                    await context.close()
+                                    await browser.close()
+                                except Exception:
+                                    pass
+
+                                # Get next proxy in rotation
+                                current_proxy = self.proxy_manager.get_next_proxy()
+                                if current_proxy:
+                                    (
+                                        browser,
+                                        context,
+                                        page,
+                                    ) = await launch_browser_context(
+                                        p, headless=True, proxy=current_proxy
+                                    )
+                                    page.on("console", _handle_console)
+                                    page.on("requestfailed", _handle_request_failed)
+                                    page.on("response", _handle_response)
+                                    logger.info(
+                                        f"✅ Switched to proxy {current_proxy.host}:{current_proxy.port}"
+                                    )
+                                    await asyncio.sleep(
+                                        random.uniform(3, 6)
+                                    )  # Brief pause after rotation
 
                             global_idx += 1
 
@@ -1054,7 +1252,7 @@ class ZalandoScraper(BatchProcessingMixin):
                     logger.info(
                         f"📄 Page {page_num} complete. Pausing before next page..."
                     )
-                    await random_delay(MIN_PAGE_DELAY, MAX_PAGE_DELAY)
+                    await random_delay(self.min_page_delay, self.max_page_delay)
 
                 # Process remaining items in final batch
                 if current_batch and batch_callback and not should_stop:
@@ -1267,15 +1465,28 @@ def find_shoe_sole_image(image_entries: List[Dict[str, str]]) -> str:
 async def extract_product_details(page: Page, url: str) -> Dict[str, Any]:
     """
     Extract brand, product name, image count, and shoe sole image URL from a product detail page.
+    Raises exception on 403 or blocking errors to trigger proxy rotation.
     """
     try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT)
+        response = await page.goto(
+            url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT
+        )
+
+        # Check for 403 or other blocking responses
+        if response and response.status == 403:
+            raise Exception("🚫 HTTP 403 Forbidden - possible rate limiting or IP ban")
 
         # Wait for main content instead of networkidle
         try:
             await page.wait_for_selector("#main-content", timeout=DEFAULT_TIMEOUT)
-        except Exception:
-            pass  # Continue even if main-content doesn't load
+        except Exception as e:
+            # Check if page shows error/blocking
+            page_content = await page.content()
+            if (
+                "access denied" in page_content.lower()
+                or "blocked" in page_content.lower()
+            ):
+                raise Exception("🚫 Access denied or blocked page detected")
 
         await asyncio.sleep(1)  # Give page time to render
 

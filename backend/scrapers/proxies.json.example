@@ -1,25 +1,60 @@
 {
   "proxies": [
     {
-      "host": "proxy1.example.com",
-      "port": 8080,
+      "host": "gate.smartproxy.com",
+      "port": 7000,
       "username": "your_username",
       "password": "your_password",
-      "protocol": "http"
+      "protocol": "http",
+      "comment": "Decodo/Smartproxy - Port 7000 = rotating (new IP each request)"
     },
     {
-      "host": "proxy2.example.com",
-      "port": 8080,
+      "host": "gate.smartproxy.com",
+      "port": 7000,
       "username": "your_username",
       "password": "your_password",
-      "protocol": "http"
+      "protocol": "http",
+      "comment": "Adding multiple entries helps our rotation system distribute load"
     },
     {
-      "host": "socks-proxy.example.com",
-      "port": 1080,
-      "username": null,
-      "password": null,
-      "protocol": "socks5"
+      "host": "gate.smartproxy.com",
+      "port": 7000,
+      "username": "your_username",
+      "password": "your_password",
+      "protocol": "http",
+      "comment": "Port 10000-10001 = sticky session (same IP for 10 min)"
     }
-  ]
+  ],
+  "notes": {
+    "recommended_providers": [
+      "Decodo (formerly Smartproxy) - https://decodo.com/ - YOU ARE USING THIS",
+      "Bright Data (formerly Luminati) - https://brightdata.com/",
+      "Oxylabs - https://oxylabs.io/",
+      "NetNut - https://netnut.io/",
+      "IPRoyal - https://iproyal.com/"
+    ],
+    "decodo_specific": {
+      "rotating_port": "7000 - New IP with EVERY request (recommended for Zalando)",
+      "sticky_ports": "10000-10001 - Same IP for 10 minutes per session",
+      "endpoint": "gate.smartproxy.com or gate.decodo.com",
+      "username_format": "your_username (no special formatting needed)",
+      "documentation": "https://help.decodo.com/hc/en-us/articles/Rotating-Proxies"
+    },
+    "proxy_types": {
+      "residential": "Best for avoiding detection - rotates through real residential IPs",
+      "datacenter": "Cheaper but more likely to be detected",
+      "mobile": "Most expensive but highest success rate for e-commerce sites"
+    },
+    "recommended_setup": {
+      "for_decodo_rotating": "Use 3-5 entries with same credentials (port 7000) - Decodo rotates IPs automatically",
+      "proxy_count": "3-5 proxy entries recommended (all can use same Decodo account)",
+      "rotation_strategy": "Our system rotates between entries + Decodo rotates IPs = double protection",
+      "session_persistence": "Port 7000 rotates each request (best for anti-detection)"
+    },
+    "configuration": {
+      "protocol": "Use 'http' or 'socks5'",
+      "authentication": "username/password optional depending on provider",
+      "health_tracking": "Automatic - proxies deactivated after 5 consecutive failures"
+    }
+  }
 }
