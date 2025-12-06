@@ -242,6 +242,14 @@ def run_crawler_job(crawler_id: str, admin_id: str, run_type: str = "manual"):
             
             app.logger.info(f"📊 Crawler loaded: {crawler.name}")
             
+            # Reset cancel_requested flag to prevent stale cancellation state
+            if crawler.cancel_requested:
+                app.logger.info(f"Resetting stale cancel_requested flag for {crawler.name}")
+                crawler.cancel_requested = False
+                crawler.cancelled_by = None
+                crawler.cancelled_at = None
+                db.session.commit()
+            
             # === STEP 7: Create Scraper Manager ===
             scraper_manager = get_scraper_manager(crawler_id, admin_id)
             
