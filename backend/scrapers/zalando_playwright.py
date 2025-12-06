@@ -156,7 +156,7 @@ async def launch_browser_context(playwright, headless: bool = True):
     Launch Chromium with anti-detection flags (AutomationControlled disabled).
     """
 
-    # Anti-detection args
+    # Anti-detection args - MORE aggressive stealth
     args = [
         "--disable-blink-features=AutomationControlled",
         "--no-sandbox",
@@ -168,6 +168,13 @@ async def launch_browser_context(playwright, headless: bool = True):
         "--disable-accelerated-2d-canvas",
         "--no-zygote",
         "--window-size=1920,1080",
+        # Additional stealth args
+        "--disable-web-security",
+        "--disable-features=IsolateOrigins,site-per-process",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-software-rasterizer",
+        "--disable-extensions",
     ]
 
     if headless:
@@ -182,8 +189,8 @@ async def launch_browser_context(playwright, headless: bool = True):
     browser = await playwright.chromium.launch(**launch_config)
     # Load persisted storage (cookies) if available to bypass consent
     context_options = BASE_CONTEXT_OPTIONS.copy()
-    # Explicit UA to match expectation (can be tuned per env)
-    ua_string = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    # Use more recent Chrome version UA
+    ua_string = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.86 Safari/537.36"
     context_options["user_agent"] = ua_string
     if STORAGE_STATE_PATH.exists():
         context = await browser.new_context(
@@ -878,14 +885,62 @@ class ZalandoScraper(BatchProcessingMixin):
             page.on("response", _handle_response)
 
             try:
-                # Navigate to base URL with retry/backoff
-                for attempt in range(MAX_RETRIES):
+                # Add random initial delay to appear more human (1-5 seconds)
+                initial_delay = random.uniform(1, 5)
+                logger.info(f"⏱️  Initial delay: {initial_delay:.1f}s (anti-detection)")
+                await asyncio.sleep(initial_delay)
+
+                # Navigate to base URL with retry/backoff and 403 detection
+                base_loaded = False
+                for attempt in range(MAX_RETRIES + 3):  # More retries for initial load
                     try:
-                        await page.goto(
+                        response = await page.goto(
                             self.base_url,
                             wait_until="domcontentloaded",
                             timeout=NAVIGATION_TIMEOUT,
                         )
+
+                        # Check for 403 block immediately
+                        if response and response.status == 403:
+                            logger.error(
+                                f"🚫 HTTP 403 on base navigation (attempt {attempt + 1}/{MAX_RETRIES + 3})"
+                            )
+
+                            # Rotate session and increase delay
+                            if attempt < MAX_RETRIES + 2:
+                                d = (
+                                    progressive_backoff(attempt) * 2
+                                )  # Double backoff for base nav
+                                logger.warning(
+                                    f"🔄 Rotating session and waiting {d:.1f}s..."
+                                )
+
+                                try:
+                                    await context.close()
+                                    await browser.close()
+                                except Exception:
+                                    pass
+
+                                # Wait before creating new session
+                                await asyncio.sleep(d)
+
+                                # Create fresh session with new UA
+                                (
+                                    browser,
+                                    context,
+                                    page,
+                                ) = await open_context_with_rotation(
+                                    random.choice(USER_AGENTS)
+                                )
+                                page.on("requestfailed", _handle_request_failed)
+                                page.on("response", _handle_response)
+                                continue
+                            else:
+                                raise Exception(
+                                    f"Failed after {MAX_RETRIES + 3} attempts - Zalando may be blocking this IP"
+                                )
+
+                        # Success - try to handle consent
                         try:
                             consent_btn = page.locator(consent_button_selector)
                             if await consent_btn.is_visible(timeout=2000):
@@ -893,7 +948,9 @@ class ZalandoScraper(BatchProcessingMixin):
                                 await asyncio.sleep(1)
                         except Exception:
                             pass
+
                         await wait_for_main_content(page, consent_button_selector)
+
                         try:
                             STORAGE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
                             await page.context.storage_state(
@@ -901,16 +958,24 @@ class ZalandoScraper(BatchProcessingMixin):
                             )
                         except Exception:
                             pass
+
+                        base_loaded = True
                         break
+
                     except Exception as e:
-                        if attempt < MAX_RETRIES - 1:
-                            d = progressive_backoff(attempt)
+                        if attempt < MAX_RETRIES + 2:
+                            d = progressive_backoff(attempt) * 1.5
                             logger.warning(
-                                f"Base navigation failed: {e}. Retrying in {d:.1f}s"
+                                f"Base navigation failed: {e}. Retrying in {d:.1f}s (attempt {attempt + 1}/{MAX_RETRIES + 3})"
                             )
                             await asyncio.sleep(d)
                         else:
                             raise
+
+                if not base_loaded:
+                    raise Exception(
+                        "Failed to load base page - site may be blocking access"
+                    )
 
                 # Resolve pages to scrape (respect checkpoint)
                 total_pages = await get_pagination_info(page)
