@@ -1,14 +1,14 @@
 {
-  "navigation_timeout_ms": 120000,
-  "default_timeout_ms": 120000,
+  "navigation_timeout_ms": 30000,
+  "default_timeout_ms": 30000,
   "page_delay_seconds": { "min": 3, "max": 8 },
   "product_delay_seconds": { "min": 0.6, "max": 1.8 },
   "backoff": { "initial_seconds": 5, "factor": 2.0, "max_seconds": 60 },
-  "max_retries": 4,
+  "max_retries": 2,
   "pages_per_session": 5,
   "consecutive_failures_for_circuit_breaker": 3,
   "circuit_breaker_sleep_seconds": 300,
-  "checkpoint_interval_products": 20,
+  "checkpoint_interval_products": 10,
   "session_rotation_on_failures": 2,
   "healthcheck_timeout_seconds": 10
 }
