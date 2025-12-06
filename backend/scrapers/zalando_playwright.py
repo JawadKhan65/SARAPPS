@@ -33,8 +33,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # CRITICAL FIX: Reduce timeouts to prevent hanging (Fix #8)
-DEFAULT_TIMEOUT = 30000  # 30 seconds (reduced from 120)
-NAVIGATION_TIMEOUT = 30000  # 30 seconds (reduced from 120)
+DEFAULT_TIMEOUT = 10000  # 10 seconds for faster blocked URL detection
+NAVIGATION_TIMEOUT = 10000  # 10 seconds for faster blocked URL detection
 MAX_RETRIES = 2  # Max 2 retries per URL (Fix #1)
 RETRY_DELAY = 3  # seconds between retries
 MAIN_CONTENT_SELECTOR = "#main-content"
@@ -709,6 +709,10 @@ class ZalandoScraper(BatchProcessingMixin):
                     random.choice(USER_AGENTS)
                 )
 
+                # Fix #5: Re-register event handlers after reset
+                page.on("requestfailed", _handle_request_failed)
+                page.on("response", _handle_response)
+
                 # Reset state
                 circuit_breaker_tripped = False
                 consecutive_403_count = 0
@@ -859,6 +863,14 @@ class ZalandoScraper(BatchProcessingMixin):
                         logger.warning(
                             f"HTTP 403 for {response.request.method} {response.url}"
                         )
+                    # Fix #4: Add 429 detection to trigger circuit breaker
+                    if response.status == 429:
+                        logger.warning(
+                            f"HTTP 429 for {response.request.method} {response.url}"
+                        )
+                        # If it's a main navigation (not just API), trigger circuit breaker
+                        if ".html" in response.url or "/schoenen" in response.url:
+                            record_429()  # This will trip circuit breaker after 3
                 except Exception:
                     pass
 
@@ -951,7 +963,6 @@ class ZalandoScraper(BatchProcessingMixin):
                     logger.info(f"\n📄 Loading page {page_num}/{last_page}: {page_url}")
 
                     page_loaded = False
-                    last_error = None
                     for attempt in range(MAX_RETRIES):
                         try:
                             response = await page.goto(
@@ -995,7 +1006,6 @@ class ZalandoScraper(BatchProcessingMixin):
                             page_loaded = True
                             break
                         except Exception as e:
-                            last_error = e
                             if attempt < MAX_RETRIES - 1:
                                 d = progressive_backoff(attempt)
                                 logger.warning(
@@ -1074,61 +1084,129 @@ class ZalandoScraper(BatchProcessingMixin):
                             f"\n🔍 Product {local_idx}/{len(product_links)}: Scraping..."
                         )
 
+                        # Rotate user-agent for each product to avoid detection
                         try:
-                            # Navigate with reduced timeout (Fix #8)
-                            response = await page.goto(
-                                product_url,
-                                wait_until="domcontentloaded",
-                                timeout=NAVIGATION_TIMEOUT,
-                            )
+                            current_ua = random.choice(USER_AGENTS)
+                            await page.evaluate(f"""() => {{
+                                Object.defineProperty(navigator, 'userAgent', {{
+                                    get: () => '{current_ua}'
+                                }});
+                            }}""")
+                        except Exception:
+                            pass
 
-                            # Fix #1: Check for HTTP 403/429 immediately
-                            if response and response.status == 403:
-                                logger.error(
-                                    f"❌ Product {local_idx}: HTTP 403 FORBIDDEN"
-                                )
-                                add_to_blocklist(product_url, 403)
-                                save_failed_url(product_url, "blocked_403", 403)
-                                record_403()
-                                adjust_delay_on_403()
-                                global_idx += 1
-                                continue  # NEVER RETRY - skip immediately
-
-                            if response and response.status == 429:
-                                logger.error(
-                                    f"❌ Product {local_idx}: HTTP 429 RATE LIMITED"
-                                )
-                                add_to_blocklist(product_url, 429)
-                                save_failed_url(product_url, "rate_limited_429", 429)
-                                record_429()
-                                adjust_delay_on_429()
-                                global_idx += 1
-                                continue  # NEVER RETRY - skip immediately
-
-                            if response and response.status >= 500:
-                                logger.error(
-                                    f"❌ Product {local_idx}: HTTP {response.status} SERVER ERROR"
-                                )
-                                save_failed_url(
-                                    product_url, "server_error", response.status
-                                )
-                                global_idx += 1
-                                continue  # Skip server errors
-
-                            # Fix #8: Quick check for main content with reduced timeout
+                        # Fix #2: Wrap product navigation in retry loop with early exit
+                        product_loaded = False
+                        response = None
+                        for product_attempt in range(MAX_RETRIES):
                             try:
-                                await page.wait_for_selector(
-                                    "#main-content", timeout=8000
+                                response = await page.goto(
+                                    product_url,
+                                    wait_until="domcontentloaded",
+                                    timeout=NAVIGATION_TIMEOUT,
                                 )
-                            except Exception:
+
+                                # Check status immediately - DON'T retry 403/429
+                                if response and response.status in [403, 429]:
+                                    if response.status == 403:
+                                        logger.error(
+                                            f"❌ Product {local_idx}: HTTP 403 FORBIDDEN"
+                                        )
+                                        add_to_blocklist(product_url, 403)
+                                        save_failed_url(product_url, "blocked_403", 403)
+                                        record_403()
+                                        adjust_delay_on_403()
+                                    elif response.status == 429:
+                                        logger.error(
+                                            f"❌ Product {local_idx}: HTTP 429 RATE LIMITED"
+                                        )
+                                        add_to_blocklist(product_url, 429)
+                                        save_failed_url(
+                                            product_url, "rate_limited_429", 429
+                                        )
+                                        record_429()
+                                        adjust_delay_on_429()
+
+                                    # Fix #1: Check circuit breaker IMMEDIATELY after detection
+                                    if circuit_breaker_tripped:
+                                        (
+                                            browser,
+                                            context,
+                                            page,
+                                        ) = await handle_circuit_breaker()
+                                        # Re-register handlers again (in case handle_circuit_breaker was just defined)
+                                        page.on("requestfailed", _handle_request_failed)
+                                        page.on("response", _handle_response)
+
+                                    break  # Don't retry blocked URLs
+
+                                if response and response.status >= 500:
+                                    logger.error(
+                                        f"❌ Product {local_idx}: HTTP {response.status} SERVER ERROR"
+                                    )
+                                    save_failed_url(
+                                        product_url, "server_error", response.status
+                                    )
+                                    break
+
+                                # Success - page loaded
+                                product_loaded = True
+                                break
+
+                            except asyncio.TimeoutError:
                                 logger.warning(
-                                    f"⚠️  Product {local_idx}: Main content not found within 8s"
+                                    f"Product attempt {product_attempt + 1}/{MAX_RETRIES} timed out after {NAVIGATION_TIMEOUT / 1000}s"
                                 )
-                                save_failed_url(
-                                    product_url, "timeout", None, "Main content timeout"
+                                if product_attempt < MAX_RETRIES - 1:
+                                    await asyncio.sleep(3)
+                                else:
+                                    save_failed_url(
+                                        product_url,
+                                        "timeout",
+                                        None,
+                                        f"Timeout after {MAX_RETRIES} attempts",
+                                    )
+                                    break
+                            except Exception as e:
+                                logger.warning(
+                                    f"Product attempt {product_attempt + 1}/{MAX_RETRIES} failed: {str(e)[:100]}"
                                 )
-                                global_idx += 1
-                                continue
+                                if product_attempt < MAX_RETRIES - 1:
+                                    await asyncio.sleep(3)
+                                else:
+                                    save_failed_url(
+                                        product_url,
+                                        "navigation_error",
+                                        None,
+                                        str(e)[:200],
+                                    )
+                                    break
+
+                        # Fix #3: Skip ALL remaining code if product didn't load or was blocked
+                        if not product_loaded:
+                            logger.error(
+                                f"❌ Product {local_idx}: Failed to load - SKIPPING"
+                            )
+                            global_idx += 1
+                            # Fix #6: Save checkpoint every 5 attempts (not just successes)
+                            if global_idx % 5 == 0:
+                                save_checkpoint()
+                            continue
+
+                        # ONLY check for main content if page loaded successfully
+                        try:
+                            await page.wait_for_selector("#main-content", timeout=5000)
+                        except Exception:
+                            logger.warning(
+                                f"⚠️  Product {local_idx}: Main content not found within 5s"
+                            )
+                            save_failed_url(
+                                product_url, "timeout", None, "Main content timeout"
+                            )
+                            global_idx += 1
+                            if global_idx % 5 == 0:
+                                save_checkpoint()
+                            continue
 
                             await asyncio.sleep(1)  # Give page time to render
 
@@ -1220,10 +1298,10 @@ class ZalandoScraper(BatchProcessingMixin):
                                     )
                                     if not should_continue:
                                         should_stop = True
-                                current_batch = []
+                                    current_batch = []
 
-                            # Fix #6: Checkpoint every 10 products
-                            if state["products_scraped"] % 10 == 0:
+                            # Fix #6: Checkpoint more frequently (every 5 successful products)
+                            if state["products_scraped"] % 5 == 0:
                                 save_checkpoint()
 
                             global_idx += 1
@@ -1239,7 +1317,10 @@ class ZalandoScraper(BatchProcessingMixin):
                                 f"Timeout after {NAVIGATION_TIMEOUT / 1000}s",
                             )
                             global_idx += 1
-                            continue  # Fix #1: Never retry timeout more than once
+                            # Fix #6: Save checkpoint on failures too
+                            if global_idx % 5 == 0:
+                                save_checkpoint()
+                            continue
 
                         except Exception as e:
                             logger.error(
@@ -1249,9 +1330,10 @@ class ZalandoScraper(BatchProcessingMixin):
                                 product_url, "extraction_error", None, str(e)[:200]
                             )
                             global_idx += 1
-                            continue
-
-                    # after page
+                            # Fix #6: Save checkpoint on failures too
+                            if global_idx % 5 == 0:
+                                save_checkpoint()
+                            continue  # after page
                     if should_stop or shutting_down["flag"]:
                         save_checkpoint()
                         break
