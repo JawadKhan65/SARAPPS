@@ -413,16 +413,16 @@ export default function CrawlersPage() {
                             </div>
                         </div>
 
-                        <div className="p-6 border-t border-gray-200 flex justify-end gap-3">
+                        <div className="p-6 border-t border-gray-200 flex flex-col sm:flex-row justify-end gap-3">
                             <button
                                 onClick={() => setConfigModal(false)}
-                                className="px-6 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors font-medium"
+                                className="px-6 py-3 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors font-medium w-full sm:w-auto"
                             >
                                 Cancel
                             </button>
                             <button
                                 onClick={handleSaveConfig}
-                                className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
+                                className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium w-full sm:w-auto"
                             >
                                 Save Changes
                             </button>
@@ -526,8 +526,8 @@ function CrawlerCard({ crawler, jobStatus, isStarting, expanded, onToggleExpand,
                         </div>
                     </div>
 
-                    {/* Right: Actions */}
-                    <div className="flex items-center gap-2 ml-4">
+                    {/* Right: Actions (desktop) */}
+                    <div className="hidden sm:flex items-center gap-2 ml-4">
                         {crawler.is_running || isStarting ? (
                             <>
                                 <button
@@ -565,6 +565,45 @@ function CrawlerCard({ crawler, jobStatus, isStarting, expanded, onToggleExpand,
                             <Settings className="w-6 h-6" />
                         </button>
                     </div>
+                </div>
+
+                {/* Mobile Actions: full-width buttons */}
+                <div className="sm:hidden mt-4 grid grid-cols-2 gap-3">
+                    {crawler.is_running || isStarting ? (
+                        <button
+                            onClick={onStop}
+                            disabled={isStarting}
+                            className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-red-600 text-white rounded-xl hover:bg-red-700 transition-colors shadow-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-red-400"
+                        >
+                            <Pause className="w-5 h-5" />
+                            Cancel
+                        </button>
+                    ) : (
+                        <button
+                            onClick={onStart}
+                            disabled={!crawler.is_active || isStarting}
+                            className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-green-600 text-white rounded-xl hover:bg-green-700 transition-colors shadow-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-green-400"
+                        >
+                            {isStarting ? (
+                                <>
+                                    <Loader2 className="w-5 h-5 animate-spin" />
+                                    Starting...
+                                </>
+                            ) : (
+                                <>
+                                    <Play className="w-5 h-5" />
+                                    Start
+                                </>
+                            )}
+                        </button>
+                    )}
+                    <button
+                        onClick={onSettings}
+                        className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-gray-100 text-gray-800 rounded-xl hover:bg-gray-200 transition-colors shadow-sm font-semibold focus:outline-none focus:ring-2 focus:ring-gray-300"
+                    >
+                        <Settings className="w-5 h-5" />
+                        Settings
+                    </button>
                 </div>
 
                 {/* Real-time Interactive Progress */}
