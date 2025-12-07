@@ -15,6 +15,7 @@ import json
 import re
 import random
 import time
+import gc
 from pathlib import Path
 from io import BytesIO
 from typing import List, Dict, Any, Optional
@@ -1113,10 +1114,10 @@ class ZalandoScraper(BatchProcessingMixin):
                                     current_batch = []
 
                             # Periodic session restart for enhanced anti-detection
-                            # Restart entire browser session to reset fingerprint
+                            # Restart entire browser session to reset fingerprint AND free memory
                             if global_idx % self.session_restart_interval == 0:
                                 logger.info(
-                                    f"🔄 Periodic session restart after {global_idx} products (anti-fingerprinting)"
+                                    f"🔄 Periodic session restart after {global_idx} products (anti-fingerprinting + memory cleanup)"
                                 )
                                 try:
                                     await page.close()
@@ -1124,6 +1125,10 @@ class ZalandoScraper(BatchProcessingMixin):
                                     await browser.close()
                                 except Exception:
                                     pass
+
+                                # Force garbage collection to free memory
+                                gc.collect()
+                                logger.debug("🧹 Memory cleanup: garbage collection completed")
 
                                 # Get next proxy (if enabled)
                                 if self.proxy_manager.enable_rotation:
@@ -1161,6 +1166,9 @@ class ZalandoScraper(BatchProcessingMixin):
                                     await browser.close()
                                 except Exception:
                                     pass
+
+                                # Light memory cleanup
+                                gc.collect()
 
                                 # Get next proxy in rotation
                                 current_proxy = self.proxy_manager.get_next_proxy()
