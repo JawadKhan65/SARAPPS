@@ -1348,7 +1348,7 @@ def start_crawler(crawler_id):
             crawler_id,
             admin_id,
             "manual",
-            job_timeout=43200  # 12 hours max for job execution (increased for large catalogs)
+            job_timeout=86400  # 24 hours max for job execution (for large catalogs)
         )
         
         # NOTE: Don't set is_running=True here - let the job set it
