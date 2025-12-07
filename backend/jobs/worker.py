@@ -135,7 +135,8 @@ def create_worker(queues, name=None):
         "connection": redis_conn,
         "name": name or f"worker-{os.getpid()}",
         "default_result_ttl": 86400,  # Keep results for 24 hours
-        "default_worker_ttl": 3600,   # Worker TTL: 1 hour
+        "default_worker_ttl": 43200,  # Worker TTL: 12 hours (increased for long crawls)
+        "job_timeout": 43200,         # Job timeout: 12 hours (allow long-running crawlers)
     }
     
     if is_windows:
