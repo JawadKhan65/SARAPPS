@@ -146,16 +146,74 @@ export default function DashboardPage() {
         return { label: 'Low Confidence', color: 'red', bgColor: 'bg-red-500' };
     };
 
+    const convertToJPEG = async (file) => {
+        return new Promise((resolve, reject) => {
+            // Check if file is already a supported format
+            const supportedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+            if (supportedTypes.includes(file.type.toLowerCase())) {
+                resolve(file);
+                return;
+            }
+
+            // Convert unsupported formats (like HEIC) to JPEG
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const img = new Image();
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d');
+
+                    // Limit size for mobile compatibility
+                    const MAX_SIZE = 2048;
+                    let width = img.width;
+                    let height = img.height;
+
+                    if (width > MAX_SIZE || height > MAX_SIZE) {
+                        if (width > height) {
+                            height = (height / width) * MAX_SIZE;
+                            width = MAX_SIZE;
+                        } else {
+                            width = (width / height) * MAX_SIZE;
+                            height = MAX_SIZE;
+                        }
+                    }
+
+                    canvas.width = width;
+                    canvas.height = height;
+                    ctx.drawImage(img, 0, 0, width, height);
+
+                    canvas.toBlob((blob) => {
+                        if (blob) {
+                            const convertedFile = new File([blob], 'converted_image.jpg', {
+                                type: 'image/jpeg',
+                                lastModified: Date.now(),
+                            });
+                            resolve(convertedFile);
+                        } else {
+                            reject(new Error('Failed to convert image'));
+                        }
+                    }, 'image/jpeg', 0.92);
+                };
+                img.onerror = () => reject(new Error('Failed to load image for conversion'));
+                img.src = e.target.result;
+            };
+            reader.onerror = () => reject(new Error('Failed to read file'));
+            reader.readAsDataURL(file);
+        });
+    };
+
     const handleImageUpload = async (file) => {
         if (!file) return;
 
-        // Validate file type
-        if (!file.type.startsWith('image/')) {
-            setError('Please upload a valid image file');
+        console.log('Original file:', { name: file.name, size: file.size, type: file.type });
+
+        // Validate file exists and has content
+        if (!file.size || file.size === 0) {
+            setError('Invalid file. Please select a valid image.');
             return;
         }
 
-        // Validate file size (10MB max)
+        // Validate file size (10MB max for original file)
         if (file.size > 10 * 1024 * 1024) {
             setError('File size must be less than 10MB');
             return;
@@ -167,17 +225,21 @@ export default function DashboardPage() {
         setFileName(file.name);
 
         try {
+            // Convert to JPEG if needed (handles HEIC and other mobile formats)
+            const processedFile = await convertToJPEG(file);
+            console.log('Processed file:', { size: processedFile.size, type: processedFile.type });
+
             // Preview image
             const reader = new FileReader();
             reader.onload = (e) => {
-                setUploadedImage(file);
+                setUploadedImage(processedFile);
                 setImagePreview(e.target.result);
             };
-            reader.readAsDataURL(file);
+            reader.readAsDataURL(processedFile);
 
             // Upload to backend
             const formData = new FormData();
-            formData.append('image', file);
+            formData.append('image', processedFile);
 
             const uploadResponse = await userAPI.uploadImage(formData);
             const imageId = uploadResponse.data.image_id;
@@ -223,7 +285,20 @@ export default function DashboardPage() {
             const imagesMap = Object.fromEntries(loadedImages);
             setMatchImages(imagesMap);
         } catch (err) {
-            setError(err.response?.data?.message || 'Failed to process image. Please try again.');
+            console.error('Upload error:', err);
+            let errorMessage = 'Failed to process image. Please try again.';
+
+            if (err.message?.includes('convert')) {
+                errorMessage = 'Unable to process this image format. Please try a different image or use the camera to capture a new photo.';
+            } else if (err.response?.data?.message) {
+                errorMessage = err.response.data.message;
+            } else if (err.response?.data?.error) {
+                errorMessage = err.response.data.error;
+            } else if (err.message) {
+                errorMessage = err.message;
+            }
+
+            setError(errorMessage);
             setImagePreview(null);
             setUploadedImage(null);
         } finally {
