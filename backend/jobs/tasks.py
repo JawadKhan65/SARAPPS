@@ -373,6 +373,20 @@ def run_crawler_job(crawler_id: str, admin_id: str, run_type: str = "manual"):
                 pipeline.expire(f"crawler:{crawler_id}:job", 604800)  # 7 days
                 pipeline.execute()
 
+                # Update database Crawler model with final counts
+                try:
+                    crawler.items_scraped = result.get("total_scraped", 0)
+                    crawler.unique_images_added = result.get("total_unique", 0)
+                    crawler.last_run_at = datetime.utcnow()
+                    db.session.commit()
+                    app.logger.info(
+                        f"✅ Updated crawler stats: {crawler.items_scraped} total, "
+                        f"{crawler.unique_images_added} unique"
+                    )
+                except Exception as e:
+                    app.logger.warning(f"⚠️  Failed to update crawler stats: {e}")
+                    db.session.rollback()
+
                 update_job_progress(
                     redis_conn,
                     crawler_id,

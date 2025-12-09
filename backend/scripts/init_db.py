@@ -269,9 +269,8 @@ def create_default_admin():
     default_admin_emails = [
         "jawadkhan10322@gmail.com",
         "mikebravens26april@gmail.com",
-        "mikevdsman@gmail.com",
-        "m.vandersman@keytalk.com",
         "admin@sarapps.com",
+        "search.and.rescue.apps@gmail.com"
     ]
 
     created = []

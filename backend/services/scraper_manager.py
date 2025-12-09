@@ -314,8 +314,8 @@ class ScraperManager:
 
         return {
             "total_scraped": total_scraped,
-            "unique": total_unique,
-            "duplicates": total_duplicates,
+            "total_unique": total_unique,  # Changed from "unique" for consistency
+            "total_duplicates": total_duplicates,  # Changed from "duplicates" for consistency
             "batches": batches_processed,
             "cancelled": cancelled,
         }
