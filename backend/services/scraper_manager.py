@@ -588,8 +588,8 @@ class ScraperManager:
         self.crawler.total_runs += 1
         self.crawler.items_scraped += result.get("total_scraped", 0)
         self.crawler.total_images_crawled += result.get("total_scraped", 0)
-        self.crawler.unique_images_added += result.get("unique", 0)
-        self.crawler.duplicate_count += result.get("duplicates", 0)
+        self.crawler.unique_images_added += result.get("total_unique", 0)
+        self.crawler.duplicate_count += result.get("total_duplicates", 0)
         self.crawler.last_error = None
         self.crawler.consecutive_errors = 0
 
@@ -598,7 +598,7 @@ class ScraperManager:
         logger.info(
             f"✅ Crawler completed: {self.crawler.name} "
             f"({result.get('total_scraped', 0)} items, "
-            f"{result.get('unique', 0)} unique, "
+            f"{result.get('total_unique', 0)} unique, "
             f"{duration:.1f}s)"
         )
 
@@ -618,8 +618,8 @@ class ScraperManager:
         self.crawler.last_run_duration_minutes = duration / 60
         self.crawler.items_scraped += result.get("total_scraped", 0)
         self.crawler.total_images_crawled += result.get("total_scraped", 0)
-        self.crawler.unique_images_added += result.get("unique", 0)
-        self.crawler.duplicate_count += result.get("duplicates", 0)
+        self.crawler.unique_images_added += result.get("total_unique", 0)
+        self.crawler.duplicate_count += result.get("total_duplicates", 0)
         db.session.commit()
 
         logger.info(
