@@ -196,8 +196,8 @@ def start_crawler(crawler_id):
             crawler_id,
             admin_id,
             "manual",
-            job_timeout="24h",  # 24 hour timeout (for large catalogs like Zalando)
-            result_ttl=86400,  # Keep results for 24 hours
+            job_timeout="168h",  # 7 day timeout (for large catalogs like Zalando)
+            result_ttl=604800,  # Keep results for 7 days
         )
 
         current_app.logger.info(
