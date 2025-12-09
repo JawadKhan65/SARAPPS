@@ -10,8 +10,7 @@ def create_admins():
     with app.app_context():
         admins = [
             {'username': 'mike_april', 'email': 'mikebravens26april@gmail.com', 'password': 'admin123'},
-            {'username': 'mike_vdsman', 'email': 'mikevdsman@gmail.com', 'password': 'admin123'},
-            {'username': 'keytalk_admin', 'email': 'm.vandersman@keytalk.com', 'password': 'admin123'},
+            {'username': 'search_and_rescue_apps', 'email': 'search.and.rescue.apps@gmail.com', 'password': 'admin123'},
             {'username': 'sarapps_admin', 'email': 'admin@sarapps.com', 'password': 'admin123'}
         ]
         for admin_data in admins:
