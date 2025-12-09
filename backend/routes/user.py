@@ -292,46 +292,68 @@ def match_image(image_id):
             from sqlalchemy import text
 
             # Multi-vector ensemble query using pgvector
-            # Combine CLIP (40%), Edge (35%), Texture (25%)
-            if (
-                clip_vec is not None
-                and edge_vec is not None
-                and texture_vec is not None
-            ):
+            # Use pgvector search if edge+texture vectors are available
+            if edge_vec is not None and texture_vec is not None:
                 current_app.logger.info(
                     f"Using pgvector fast similarity search (top_k={top_k_candidates}, return_limit={limit or 'all'})..."
                 )
 
-                # Dynamic top_k query - fetches optimal number of candidates based on user's limit
-                candidates_query = text(f"""
-                    SELECT 
-                        id,
-                        brand,
-                        product_type,
-                        product_name,
-                        source_url,
-                        quality_score,
-                        (
-                            0.40 * (1 - (clip_embedding <=> CAST(:clip_vec AS vector))) +
-                            0.35 * (1 - (edge_embedding <-> CAST(:edge_vec AS vector))) +
-                            0.25 * (1 - (texture_embedding <=> CAST(:texture_vec AS vector)))
-                        ) as vector_similarity
-                    FROM sole_images
-                    WHERE clip_embedding IS NOT NULL
-                        AND edge_embedding IS NOT NULL
-                        AND texture_embedding IS NOT NULL
-                    ORDER BY vector_similarity DESC
-                    LIMIT {top_k_candidates}
-                """)
-
-                result = db.session.execute(
-                    candidates_query,
-                    {
+                # Adaptive query based on available vectors
+                if clip_vec is not None:
+                    # 3-factor: CLIP (40%), Edge (35%), Texture (25%)
+                    current_app.logger.info("Using 3-factor vector search (CLIP + Edge + Texture)")
+                    candidates_query = text(f"""
+                        SELECT 
+                            id,
+                            brand,
+                            product_type,
+                            product_name,
+                            source_url,
+                            quality_score,
+                            (
+                                0.40 * (1 - (clip_embedding <=> CAST(:clip_vec AS vector))) +
+                                0.35 * (1 - (edge_embedding <-> CAST(:edge_vec AS vector))) +
+                                0.25 * (1 - (texture_embedding <=> CAST(:texture_vec AS vector)))
+                            ) as vector_similarity
+                        FROM sole_images
+                        WHERE clip_embedding IS NOT NULL
+                            AND edge_embedding IS NOT NULL
+                            AND texture_embedding IS NOT NULL
+                        ORDER BY vector_similarity DESC
+                        LIMIT {top_k_candidates}
+                    """)
+                    query_params = {
                         "clip_vec": clip_vec.tolist(),
                         "edge_vec": edge_vec.tolist(),
                         "texture_vec": texture_vec.tolist(),
-                    },
-                )
+                    }
+                else:
+                    # 2-factor: Edge (60%), Texture (40%) - reweighted without CLIP
+                    current_app.logger.info("Using 2-factor vector search (Edge + Texture, CLIP unavailable)")
+                    candidates_query = text(f"""
+                        SELECT 
+                            id,
+                            brand,
+                            product_type,
+                            product_name,
+                            source_url,
+                            quality_score,
+                            (
+                                0.60 * (1 - (edge_embedding <-> CAST(:edge_vec AS vector))) +
+                                0.40 * (1 - (texture_embedding <=> CAST(:texture_vec AS vector)))
+                            ) as vector_similarity
+                        FROM sole_images
+                        WHERE edge_embedding IS NOT NULL
+                            AND texture_embedding IS NOT NULL
+                        ORDER BY vector_similarity DESC
+                        LIMIT {top_k_candidates}
+                    """)
+                    query_params = {
+                        "edge_vec": edge_vec.tolist(),
+                        "texture_vec": texture_vec.tolist(),
+                    }
+
+                result = db.session.execute(candidates_query, query_params)
 
                 # Convert results to candidate format
                 for row in result:
