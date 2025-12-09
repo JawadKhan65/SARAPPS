@@ -230,14 +230,18 @@ def match_image(image_id):
     user_id = get_jwt_identity()
     user = User.query.get(user_id)
 
-    # Get limit from request body (default: None = all matches, max: 100 for performance)
+    # Get limit from request body (default: 20, max: 1000 for custom range)
     data = request.get_json() or {}
     requested_limit = data.get("limit")
 
     if requested_limit is None:
-        limit = None  # Return all matches
+        # Custom range: return all matches but use top 200 candidates for efficiency
+        limit = None  
+        top_k_candidates = 200  # Fetch more candidates for custom range
     else:
-        limit = min(int(requested_limit), 100)  # Cap at 100 for performance
+        limit = int(requested_limit)
+        # Dynamic top_k: fetch 2x the requested limit for better quality (min 50, max 500)
+        top_k_candidates = min(max(limit * 2, 50), 500)
 
     if not user:
         return jsonify({"error": "User not found"}), 404
@@ -294,9 +298,12 @@ def match_image(image_id):
                 and edge_vec is not None
                 and texture_vec is not None
             ):
-                current_app.logger.info("Using pgvector fast similarity search...")
+                current_app.logger.info(
+                    f"Using pgvector fast similarity search (top_k={top_k_candidates}, return_limit={limit or 'all'})..."
+                )
 
-                candidates_query = text("""
+                # Dynamic top_k query - fetches optimal number of candidates based on user's limit
+                candidates_query = text(f"""
                     SELECT 
                         id,
                         brand,
@@ -314,7 +321,7 @@ def match_image(image_id):
                         AND edge_embedding IS NOT NULL
                         AND texture_embedding IS NOT NULL
                     ORDER BY vector_similarity DESC
-                    LIMIT 50
+                    LIMIT {top_k_candidates}
                 """)
 
                 result = db.session.execute(
@@ -372,7 +379,7 @@ def match_image(image_id):
 
             # Sort candidates by quick score
             candidates.sort(key=lambda x: x["quick_score"], reverse=True)
-            candidates = candidates[:50]  # Take top 50
+            candidates = candidates[:top_k_candidates]  # Take top_k candidates
 
         top_candidates = candidates
 
@@ -453,17 +460,28 @@ def match_image(image_id):
         # Sort by confidence
         matches.sort(key=lambda x: x["confidence"], reverse=True)
 
-        # Apply limit if specified, otherwise return all
-        if limit is not None:
-            top_matches = matches[:limit]
+        # Apply minimum similarity threshold (filter out very low quality matches)
+        MIN_SIMILARITY_THRESHOLD = 0.15  # Only return matches with >15% similarity
+        quality_matches = [m for m in matches if m["confidence"] >= MIN_SIMILARITY_THRESHOLD]
+        
+        # Log filtering stats
+        if len(quality_matches) < len(matches):
             current_app.logger.info(
-                f"Matching complete: Found {len(matches)} total matches, "
+                f"Filtered out {len(matches) - len(quality_matches)} low-quality matches "
+                f"(below {MIN_SIMILARITY_THRESHOLD:.0%} threshold)"
+            )
+
+        # Apply limit if specified, otherwise return all quality matches
+        if limit is not None:
+            top_matches = quality_matches[:limit]
+            current_app.logger.info(
+                f"Matching complete: Found {len(quality_matches)} quality matches, "
                 f"returning top {len(top_matches)} (limit={limit})"
             )
         else:
-            top_matches = matches
+            top_matches = quality_matches
             current_app.logger.info(
-                f"Matching complete: Found {len(matches)} total matches, "
+                f"Matching complete: Found {len(quality_matches)} quality matches, "
                 f"returning ALL matches (no limit)"
             )
 
@@ -532,16 +550,16 @@ def match_image(image_id):
             id=str(uuid.uuid4()),
             user_id=user_id,
             uploaded_image_id=image_id,
-            total_matches=len(matches),
-            best_score=matches[0]["confidence"] if matches else 0,
+            total_matches=len(quality_matches),
+            best_score=quality_matches[0]["confidence"] if quality_matches else 0,
             matching_time_ms=0,
             matched_at=datetime.utcnow(),
         )
         db.session.add(match_history)
         db.session.flush()  # Get the match_history ID
 
-        # Create match detail records for ALL matches
-        for rank, match in enumerate(matches, start=1):
+        # Create match detail records for quality matches (save disk space by not storing junk)
+        for rank, match in enumerate(quality_matches, start=1):
             match_detail = MatchDetail(
                 id=str(uuid.uuid4()),
                 match_history_id=match_history.id,
@@ -558,7 +576,7 @@ def match_image(image_id):
             f"Image matched for user {user_id}: "
             f"primary={top_matches[0]['brand'] if top_matches[0] else 'None'} "
             f"({top_matches[0]['confidence'] if top_matches[0] else 0:.2f}), "
-            f"saved {len(matches)} matches to history"
+            f"saved {len(quality_matches)} quality matches to history"
         )
 
         return jsonify(
@@ -566,9 +584,9 @@ def match_image(image_id):
                 "match_id": match_result.id,
                 "uploaded_image_id": image_id,
                 "matches": top_matches,
-                "total_matches": len(matches),  # Total matches found
+                "total_matches": len(quality_matches),  # Total quality matches found
                 "returned_matches": len(top_matches),  # Matches returned
-                "has_more": len(matches) > len(top_matches) if limit else False,
+                "has_more": len(quality_matches) > len(top_matches) if limit else False,
                 "timestamp": datetime.utcnow().isoformat(),
             }
         ), 200

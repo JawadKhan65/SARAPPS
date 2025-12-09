@@ -402,7 +402,7 @@ export default function DashboardPage() {
                                     🔍 Smart Matching Enabled
                                 </p>
                                 <p className="text-xs text-gray-600">
-                                    {matchLimit ? `Finding top ${matchLimit} matches` : 'Finding ALL matches'} in our database
+                                    {matchLimit ? `Finding top ${matchLimit} most similar matches` : 'Finding matches in custom range (all available)'} in our database
                                 </p>
                                 {totalMatches > 0 && (
                                     <p className="text-sm font-bold text-blue-600 mt-2">
@@ -412,19 +412,21 @@ export default function DashboardPage() {
                             </div>
 
                             <div className="flex items-center gap-2">
-                                <label className="text-xs font-semibold text-gray-700">Results:</label>
+                                <label className="text-xs font-semibold text-gray-700">Top Matches:</label>
                                 <select
-                                    className="px-3 py-2 bg-white border border-blue-200 rounded-lg text-sm"
-                                    value={matchLimit ?? 'all'}
-                                    onChange={(e) => setMatchLimit(e.target.value === 'all' ? null : Number(e.target.value))}
+                                    className="px-3 py-2 bg-white border border-gray-300 rounded-lg text-sm font-semibold text-black shadow-sm hover:border-blue-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 transition-all cursor-pointer"
+                                    value={matchLimit ?? 'custom'}
+                                    onChange={(e) => setMatchLimit(e.target.value === 'custom' ? null : Number(e.target.value))}
                                     disabled={loading}
                                 >
-                                    <option value={4}>Top 4</option>
+                                    <option value={5}>Top 5</option>
                                     <option value={10}>Top 10</option>
                                     <option value={20}>Top 20</option>
                                     <option value={50}>Top 50</option>
                                     <option value={100}>Top 100</option>
-                                    <option value={'all'}>All</option>
+                                    <option value={200}>Top 200</option>
+                                    <option value={500}>Top 500</option>
+                                    <option value={'custom'}>Custom Range (All)</option>
                                 </select>
                             </div>
                         </div>
