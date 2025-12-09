@@ -213,9 +213,9 @@ export default function DashboardPage() {
             return;
         }
 
-        // Validate file size (10MB max for original file)
-        if (file.size > 10 * 1024 * 1024) {
-            setError('File size must be less than 10MB');
+        // Validate file size (100MB max for original file)
+        if (file.size > 100 * 1024 * 1024) {
+            setError('File size must be less than 100MB');
             return;
         }
 
@@ -464,7 +464,7 @@ export default function DashboardPage() {
                                     Drag & drop or click to browse
                                 </p>
                                 <p className="text-xs text-gray-400">
-                                    Supports: JPG, PNG, WEBP (Max 10MB)
+                                    Supports: JPG, PNG, WEBP (Max 100MB)
                                 </p>
                             </div>
                             <input

@@ -42,7 +42,7 @@ class Config:
     MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER", "noreply@stip.local")
 
     # File uploads
-    MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # 50 MB max file size
+    MAX_CONTENT_LENGTH = 120 * 1024 * 1024  # 120 MB max file size
     UPLOAD_FOLDER = "/app/uploads"
     ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
 
@@ -52,17 +52,33 @@ class Config:
     # Image processing
     SIMILARITY_THRESHOLD = 0.85  # Stop scraping if uniqueness < 85%
     BATCH_SIZE = 50  # Process images in batches of 50
-    
+
     # Zalando Scraper Anti-Detection Configuration
-    ZALANDO_MIN_PRODUCT_DELAY = int(os.getenv('ZALANDO_MIN_PRODUCT_DELAY', 8))  # Min seconds between products
-    ZALANDO_MAX_PRODUCT_DELAY = int(os.getenv('ZALANDO_MAX_PRODUCT_DELAY', 15))  # Max seconds between products
-    ZALANDO_MIN_PAGE_DELAY = int(os.getenv('ZALANDO_MIN_PAGE_DELAY', 30))  # Min seconds between pages
-    ZALANDO_MAX_PAGE_DELAY = int(os.getenv('ZALANDO_MAX_PAGE_DELAY', 60))  # Max seconds between pages
-    ZALANDO_PROXY_ROTATION_INTERVAL = int(os.getenv('ZALANDO_PROXY_ROTATION_INTERVAL', 15))  # Rotate proxy every N products
-    ZALANDO_SESSION_RESTART_INTERVAL = int(os.getenv('ZALANDO_SESSION_RESTART_INTERVAL', 30))  # Restart browser every N products (reduced from 50 to prevent memory buildup)
-    ZALANDO_MAX_RETRIES_PER_PRODUCT = int(os.getenv('ZALANDO_MAX_RETRIES_PER_PRODUCT', 3))  # Max retries per product
-    ZALANDO_ENABLE_PROXIES = os.getenv('ZALANDO_ENABLE_PROXIES', 'true').lower() == 'true'  # Enable/disable proxy rotation
-    
+    ZALANDO_MIN_PRODUCT_DELAY = int(
+        os.getenv("ZALANDO_MIN_PRODUCT_DELAY", 8)
+    )  # Min seconds between products
+    ZALANDO_MAX_PRODUCT_DELAY = int(
+        os.getenv("ZALANDO_MAX_PRODUCT_DELAY", 15)
+    )  # Max seconds between products
+    ZALANDO_MIN_PAGE_DELAY = int(
+        os.getenv("ZALANDO_MIN_PAGE_DELAY", 30)
+    )  # Min seconds between pages
+    ZALANDO_MAX_PAGE_DELAY = int(
+        os.getenv("ZALANDO_MAX_PAGE_DELAY", 60)
+    )  # Max seconds between pages
+    ZALANDO_PROXY_ROTATION_INTERVAL = int(
+        os.getenv("ZALANDO_PROXY_ROTATION_INTERVAL", 15)
+    )  # Rotate proxy every N products
+    ZALANDO_SESSION_RESTART_INTERVAL = int(
+        os.getenv("ZALANDO_SESSION_RESTART_INTERVAL", 30)
+    )  # Restart browser every N products (reduced from 50 to prevent memory buildup)
+    ZALANDO_MAX_RETRIES_PER_PRODUCT = int(
+        os.getenv("ZALANDO_MAX_RETRIES_PER_PRODUCT", 3)
+    )  # Max retries per product
+    ZALANDO_ENABLE_PROXIES = (
+        os.getenv("ZALANDO_ENABLE_PROXIES", "true").lower() == "true"
+    )  # Enable/disable proxy rotation
+
     # Scraper Configuration
     # Minimum items to scrape before considering stopping based on uniqueness
     # Large e-commerce sites should scrape more before stopping

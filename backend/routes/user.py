@@ -128,7 +128,7 @@ def upload_image():
         return jsonify({"error": "File type not allowed"}), 400
 
     # Check file size
-    max_size = current_app.config.get("MAX_CONTENT_LENGTH", 50 * 1024 * 1024)
+    max_size = current_app.config.get("MAX_CONTENT_LENGTH", 120 * 1024 * 1024)
     file.seek(0, 2)  # Seek to end
     file_size = file.tell()
     file.seek(0)  # Seek back to start
