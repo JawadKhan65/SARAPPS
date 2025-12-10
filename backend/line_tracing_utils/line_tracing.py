@@ -102,13 +102,19 @@ def process_reference_sole(
         cv.waitKey(0)
         cv.destroyAllWindows()
 
-    # Return the most processed form for storage
-    # If use_polar is True, return polar-transformed edges (rotation invariant)
-    # Otherwise return regular refined edges
+    # Return both enhanced and edges for rich feature extraction
+    # If use_polar is True, return polar-transformed versions (rotation invariant)
+    # Otherwise return regular versions
     if use_polar and polar_refined is not None:
-        return polar_refined
+        return {
+            "enhanced": polar_enhanced,
+            "edges": polar_refined
+        }
     else:
-        return refined
+        return {
+            "enhanced": enhanced,
+            "edges": refined
+        }
 
 
 def extract_robust_features(processed_dict):
@@ -287,13 +293,16 @@ def compare_sole_images(img1, img2, debug=False):
     # Process query image (img1) with polar transform
     processed1 = process_reference_sole(img1, use_polar=True, debug=False)
 
-    # img2 is already processed (from database), use as-is
-    processed2 = img2
+    # img2 should be a dict with 'enhanced' and 'edges', but handle backward compatibility
+    if isinstance(img2, dict):
+        processed2 = img2
+    else:
+        # Old format: single matrix (assume it's edges)
+        processed2 = {"edges": img2, "enhanced": img2}
 
-    # Since processed images are now just edge matrices, we need to work with them directly
-    # Create minimal dict structure for backward compatibility
-    features1_dict = {"edges": processed1, "enhanced": processed1}
-    features2_dict = {"edges": processed2, "enhanced": processed2}
+    # Use the processed dictionaries directly
+    features1_dict = processed1
+    features2_dict = processed2
 
     # Extract comprehensive features
     features1 = extract_robust_features(features1_dict)
@@ -349,15 +358,15 @@ def compare_sole_images(img1, img2, debug=False):
         scores["hog"] = 0
 
     # === 5. SSIM (Structural Similarity) ===
-    # processed1 and processed2 are already edge matrices (polar transformed)
-    ssim_score = ssim(processed1, processed2, data_range=255)
+    # Use edges for SSIM comparison (polar transformed)
+    ssim_score = ssim(features1_dict["edges"], features2_dict["edges"], data_range=255)
     scores["ssim"] = max(0, ssim_score)
 
     # === 6. Template Matching (Multi-scale) ===
     template_scores = []
     scales = [0.8, 0.9, 1.0, 1.1, 1.2]
-    edge1 = processed1  # Already edge matrix
-    edge2 = processed2  # Already edge matrix
+    edge1 = features1_dict["edges"]
+    edge2 = features2_dict["edges"]
 
     for scale in scales:
         try:
@@ -460,9 +469,9 @@ def compare_sole_images(img1, img2, debug=False):
         # Visualize best matches
         if len(sift_matches) > 0:
             sift_vis = cv.drawMatches(
-                processed1["enhanced"],
+                features1_dict["enhanced"],
                 features1["sift_kp"],
-                processed2["enhanced"],
+                features2_dict["enhanced"],
                 features2["sift_kp"],
                 sorted(sift_matches, key=lambda x: x.distance)[:30],
                 None,
@@ -471,7 +480,7 @@ def compare_sole_images(img1, img2, debug=False):
             cv.imshow("SIFT Matches (Top 30)", sift_vis)
 
         # Side-by-side comparison
-        comparison = np.hstack([processed1["edges"], processed2["edges"]])
+        comparison = np.hstack([features1_dict["edges"], features2_dict["edges"]])
         cv.imshow("Edge Comparison", comparison)
         cv.waitKey(0)
         cv.destroyAllWindows()

@@ -446,22 +446,35 @@ def match_image(image_id):
                 try:
                     # Load DB sole image (already processed)
                     db_img_bytes = sole_image.processed_image_data
-                    db_img_array = cv.imdecode(
+                    db_img_concat = cv.imdecode(
                         np.frombuffer(db_img_bytes, np.uint8), cv.IMREAD_GRAYSCALE
                     )
 
-                    if db_img_array is None:
+                    if db_img_concat is None:
                         current_app.logger.warning(
                             f"Failed to decode image for {sole_image.id}"
                         )
                         similarity = candidate["quick_score"]
                     else:
+                        # Split concatenated image back into enhanced and edges
+                        # Images were stacked vertically [enhanced; edges]
+                        height = db_img_concat.shape[0]
+                        if height >= 1024:  # 512 + 512
+                            half_height = height // 2
+                            db_img_dict = {
+                                "enhanced": db_img_concat[:half_height, :],
+                                "edges": db_img_concat[half_height:, :]
+                            }
+                        else:
+                            # Old format: single matrix (backward compatibility)
+                            db_img_dict = {"enhanced": db_img_concat, "edges": db_img_concat}
+                        
                         # Use compare_sole_images for accurate similarity
                         # uploaded_img_array (grayscale original) will be processed inside compare_sole_images
-                        # db_img_array is already processed from DB
+                        # db_img_dict contains both enhanced and edges from DB
                         similarity = compare_sole_images(
                             uploaded_img_array,  # Original grayscale, will be processed
-                            db_img_array,  # Already processed matrix from DB
+                            db_img_dict,  # Dict with enhanced and edges from DB
                             debug=False,
                         )
                         current_app.logger.debug(

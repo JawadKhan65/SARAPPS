@@ -322,7 +322,7 @@ class ScraperService:
 
                     # Use process_reference_sole for rotation-robust processing
                     if process_reference_sole:
-                        processed_matrix = process_reference_sole(
+                        processed_result = process_reference_sole(
                             img_array,
                             target_size=(512, 512),
                             keep_aspect=True,
@@ -330,7 +330,14 @@ class ScraperService:
                             debug=False,
                         )
 
-                        # Convert processed matrix to bytes (no file write)
+                        # processed_result is now a dict with 'enhanced' and 'edges'
+                        # Concatenate vertically for storage (split during comparison)
+                        processed_matrix = np.vstack([
+                            processed_result["enhanced"],
+                            processed_result["edges"]
+                        ])
+
+                        # Convert concatenated matrix to bytes (no file write)
                         _, buffer = cv.imencode(".png", processed_matrix)
                         processed_image_bytes = buffer.tobytes()
 
