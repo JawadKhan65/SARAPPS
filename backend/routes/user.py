@@ -383,9 +383,9 @@ def match_image(image_id):
                                 }
                             )
 
-                        current_app.logger.info(
-                            f"✓ Vector search found {len(candidates)} candidates in <50ms"
-                        )
+                    current_app.logger.info(
+                        f"✓ Vector search found {len(candidates)} candidates in <50ms"
+                    )
                 except Exception as e:
                     current_app.logger.warning(
                         f"Vector search failed, falling back to linear search: {str(e)}"
