@@ -311,117 +311,117 @@ def match_image(image_id):
                 # Multi-vector ensemble query using pgvector
                 # Use pgvector search if edge+texture vectors are available
                 if edge_vec is not None and texture_vec is not None:
-                current_app.logger.info(
-                    f"Using pgvector fast similarity search (top_k={top_k_candidates}, return_limit={limit or 'all'})..."
-                )
-
-                # Adaptive query based on available vectors
-                if clip_vec is not None:
-                    # 3-factor: CLIP (40%), Edge (35%), Texture (25%)
-                    current_app.logger.info("Using 3-factor vector search (CLIP + Edge + Texture)")
-                    candidates_query = text(f"""
-                        SELECT 
-                            id,
-                            brand,
-                            product_type,
-                            product_name,
-                            source_url,
-                            quality_score,
-                            (
-                                0.40 * (1 - (clip_embedding <=> CAST(:clip_vec AS vector))) +
-                                0.35 * (1 - (edge_embedding <-> CAST(:edge_vec AS vector))) +
-                                0.25 * (1 - (texture_embedding <=> CAST(:texture_vec AS vector)))
-                            ) as vector_similarity
-                        FROM sole_images
-                        WHERE clip_embedding IS NOT NULL
-                            AND edge_embedding IS NOT NULL
-                            AND texture_embedding IS NOT NULL
-                        ORDER BY vector_similarity DESC
-                        LIMIT {top_k_candidates}
-                    """)
-                    query_params = {
-                        "clip_vec": clip_vec.tolist(),
-                        "edge_vec": edge_vec.tolist(),
-                        "texture_vec": texture_vec.tolist(),
-                    }
-                else:
-                    # 2-factor: Edge (60%), Texture (40%) - reweighted without CLIP
-                    current_app.logger.info("Using 2-factor vector search (Edge + Texture, CLIP unavailable)")
-                    candidates_query = text(f"""
-                        SELECT 
-                            id,
-                            brand,
-                            product_type,
-                            product_name,
-                            source_url,
-                            quality_score,
-                            (
-                                0.60 * (1 - (edge_embedding <-> CAST(:edge_vec AS vector))) +
-                                0.40 * (1 - (texture_embedding <=> CAST(:texture_vec AS vector)))
-                            ) as vector_similarity
-                        FROM sole_images
-                        WHERE edge_embedding IS NOT NULL
-                            AND texture_embedding IS NOT NULL
-                        ORDER BY vector_similarity DESC
-                        LIMIT {top_k_candidates}
-                    """)
-                    query_params = {
-                        "edge_vec": edge_vec.tolist(),
-                        "texture_vec": texture_vec.tolist(),
-                    }
-
-                result = db.session.execute(candidates_query, query_params)
-
-                # Convert results to candidate format
-                for row in result:
-                    sole_image = SoleImage.query.get(row.id)
-                    if sole_image:
-                        candidates.append(
-                            {
-                                "sole_image": sole_image,
-                                "quick_score": float(row.vector_similarity),
-                            }
-                        )
-
                     current_app.logger.info(
-                        f"✓ Vector search found {len(candidates)} candidates in <50ms"
+                        f"Using pgvector fast similarity search (top_k={top_k_candidates}, return_limit={limit or 'all'})..."
                     )
-            except Exception as e:
-                current_app.logger.warning(
-                    f"Vector search failed, falling back to linear search: {str(e)}"
-                )
-                candidates = []
 
-            # Fallback to legacy feature-based search if vector search failed or returned no results
-            if not candidates:
-                current_app.logger.info("Using legacy linear feature search...")
-                sole_images = SoleImage.query.all()
+                    # Adaptive query based on available vectors
+                    if clip_vec is not None:
+                        # 3-factor: CLIP (40%), Edge (35%), Texture (25%)
+                        current_app.logger.info("Using 3-factor vector search (CLIP + Edge + Texture)")
+                        candidates_query = text(f"""
+                            SELECT 
+                                id,
+                                brand,
+                                product_type,
+                                product_name,
+                                source_url,
+                                quality_score,
+                                (
+                                    0.40 * (1 - (clip_embedding <=> CAST(:clip_vec AS vector))) +
+                                    0.35 * (1 - (edge_embedding <-> CAST(:edge_vec AS vector))) +
+                                    0.25 * (1 - (texture_embedding <=> CAST(:texture_vec AS vector)))
+                                ) as vector_similarity
+                            FROM sole_images
+                            WHERE clip_embedding IS NOT NULL
+                                AND edge_embedding IS NOT NULL
+                                AND texture_embedding IS NOT NULL
+                            ORDER BY vector_similarity DESC
+                            LIMIT {top_k_candidates}
+                        """)
+                        query_params = {
+                            "clip_vec": clip_vec.tolist(),
+                            "edge_vec": edge_vec.tolist(),
+                            "texture_vec": texture_vec.tolist(),
+                        }
+                    else:
+                        # 2-factor: Edge (60%), Texture (40%) - reweighted without CLIP
+                        current_app.logger.info("Using 2-factor vector search (Edge + Texture, CLIP unavailable)")
+                        candidates_query = text(f"""
+                            SELECT 
+                                id,
+                                brand,
+                                product_type,
+                                product_name,
+                                source_url,
+                                quality_score,
+                                (
+                                    0.60 * (1 - (edge_embedding <-> CAST(:edge_vec AS vector))) +
+                                    0.40 * (1 - (texture_embedding <=> CAST(:texture_vec AS vector)))
+                                ) as vector_similarity
+                            FROM sole_images
+                            WHERE edge_embedding IS NOT NULL
+                                AND texture_embedding IS NOT NULL
+                            ORDER BY vector_similarity DESC
+                            LIMIT {top_k_candidates}
+                        """)
+                        query_params = {
+                            "edge_vec": edge_vec.tolist(),
+                            "texture_vec": texture_vec.tolist(),
+                        }
 
-                for sole_image in sole_images:
-                    # Quick feature-based similarity check
-                    if uploaded_features and sole_image.feature_vector:
-                        try:
-                            sole_features = processor.deserialize_features(
-                                sole_image.feature_vector
-                            )
-                            similarity = processor.calculate_similarity(
-                                uploaded_features, sole_features
-                            )
+                    result = db.session.execute(candidates_query, query_params)
+
+                    # Convert results to candidate format
+                    for row in result:
+                        sole_image = SoleImage.query.get(row.id)
+                        if sole_image:
                             candidates.append(
-                                {"sole_image": sole_image, "quick_score": similarity}
+                                {
+                                    "sole_image": sole_image,
+                                    "quick_score": float(row.vector_similarity),
+                                }
                             )
-                        except Exception as e:
-                            current_app.logger.warning(
-                                f"Feature comparison failed for {sole_image.id}: {str(e)}"
-                            )
-                            continue
 
-                # Sort candidates by quick score
-                candidates.sort(key=lambda x: x["quick_score"], reverse=True)
-                candidates = candidates[:top_k_candidates]  # Take top_k candidates
+                        current_app.logger.info(
+                            f"✓ Vector search found {len(candidates)} candidates in <50ms"
+                        )
+                except Exception as e:
+                    current_app.logger.warning(
+                        f"Vector search failed, falling back to linear search: {str(e)}"
+                    )
+                    candidates = []
 
-            top_candidates = candidates
-        # End of disabled vector search section
+                # Fallback to legacy feature-based search if vector search failed or returned no results
+                if not candidates:
+                    current_app.logger.info("Using legacy linear feature search...")
+                    sole_images = SoleImage.query.all()
+
+                    for sole_image in sole_images:
+                        # Quick feature-based similarity check
+                        if uploaded_features and sole_image.feature_vector:
+                            try:
+                                sole_features = processor.deserialize_features(
+                                    sole_image.feature_vector
+                                )
+                                similarity = processor.calculate_similarity(
+                                    uploaded_features, sole_features
+                                )
+                                candidates.append(
+                                    {"sole_image": sole_image, "quick_score": similarity}
+                                )
+                            except Exception as e:
+                                current_app.logger.warning(
+                                    f"Feature comparison failed for {sole_image.id}: {str(e)}"
+                                )
+                                continue
+
+                    # Sort candidates by quick score
+                    candidates.sort(key=lambda x: x["quick_score"], reverse=True)
+                    candidates = candidates[:top_k_candidates]  # Take top_k candidates
+
+                top_candidates = candidates
+            # End of disabled vector search section
 
         # Step 2: Now use compare_sole_images on ALL images for accurate matching
         current_app.logger.info(f"⚡ Starting comprehensive comparison against {len(top_candidates)} images...")
