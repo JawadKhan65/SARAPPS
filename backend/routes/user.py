@@ -386,41 +386,41 @@ def match_image(image_id):
                     current_app.logger.info(
                         f"✓ Vector search found {len(candidates)} candidates in <50ms"
                     )
-                except Exception as e:
-                    current_app.logger.warning(
-                        f"Vector search failed, falling back to linear search: {str(e)}"
-                    )
-                    candidates = []
+            except Exception as e:
+                current_app.logger.warning(
+                    f"Vector search failed, falling back to linear search: {str(e)}"
+                )
+                candidates = []
 
-                # Fallback to legacy feature-based search if vector search failed or returned no results
-                if not candidates:
-                    current_app.logger.info("Using legacy linear feature search...")
-                    sole_images = SoleImage.query.all()
+            # Fallback to legacy feature-based search if vector search failed or returned no results
+            if not candidates:
+                current_app.logger.info("Using legacy linear feature search...")
+                sole_images = SoleImage.query.all()
 
-                    for sole_image in sole_images:
-                        # Quick feature-based similarity check
-                        if uploaded_features and sole_image.feature_vector:
-                            try:
-                                sole_features = processor.deserialize_features(
-                                    sole_image.feature_vector
-                                )
-                                similarity = processor.calculate_similarity(
-                                    uploaded_features, sole_features
-                                )
-                                candidates.append(
-                                    {"sole_image": sole_image, "quick_score": similarity}
-                                )
-                            except Exception as e:
-                                current_app.logger.warning(
-                                    f"Feature comparison failed for {sole_image.id}: {str(e)}"
-                                )
-                                continue
+                for sole_image in sole_images:
+                    # Quick feature-based similarity check
+                    if uploaded_features and sole_image.feature_vector:
+                        try:
+                            sole_features = processor.deserialize_features(
+                                sole_image.feature_vector
+                            )
+                            similarity = processor.calculate_similarity(
+                                uploaded_features, sole_features
+                            )
+                            candidates.append(
+                                {"sole_image": sole_image, "quick_score": similarity}
+                            )
+                        except Exception as e:
+                            current_app.logger.warning(
+                                f"Feature comparison failed for {sole_image.id}: {str(e)}"
+                            )
+                            continue
 
-                    # Sort candidates by quick score
-                    candidates.sort(key=lambda x: x["quick_score"], reverse=True)
-                    candidates = candidates[:top_k_candidates]  # Take top_k candidates
+                # Sort candidates by quick score
+                candidates.sort(key=lambda x: x["quick_score"], reverse=True)
+                candidates = candidates[:top_k_candidates]  # Take top_k candidates
 
-                top_candidates = candidates
+            top_candidates = candidates
             # End of disabled vector search section
 
         # Step 2: Now use compare_sole_images on ALL images for accurate matching
