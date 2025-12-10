@@ -286,14 +286,31 @@ def match_image(image_id):
         edge_vec = uploaded_vectors.get("edge_vector")
         texture_vec = uploaded_vectors.get("texture_vector")
 
-        # Try vector-based search first (much faster!)
+        # === COMPREHENSIVE MODE: Get ALL images for exhaustive comparison ===
+        current_app.logger.info("🔍 COMPREHENSIVE MODE: Fetching ALL database images for exhaustive comparison...")
+        
+        # Get ALL images from database (no filtering)
+        all_sole_images = SoleImage.query.all()
+        current_app.logger.info(f"  Found {len(all_sole_images)} total images in database")
+        
         candidates = []
-        try:
-            from sqlalchemy import text
+        for sole_image in all_sole_images:
+            candidates.append({
+                "sole_image": sole_image,
+                "quick_score": 0.0  # Will be replaced by compare_sole_images
+            })
+        
+        top_candidates = candidates
+        
+        # Skip vector search - user wants comprehensive comparison
+        if False:  # Disabled - using comprehensive mode
+            # Try vector-based search first (much faster!)
+            try:
+                from sqlalchemy import text
 
-            # Multi-vector ensemble query using pgvector
-            # Use pgvector search if edge+texture vectors are available
-            if edge_vec is not None and texture_vec is not None:
+                # Multi-vector ensemble query using pgvector
+                # Use pgvector search if edge+texture vectors are available
+                if edge_vec is not None and texture_vec is not None:
                 current_app.logger.info(
                     f"Using pgvector fast similarity search (top_k={top_k_candidates}, return_limit={limit or 'all'})..."
                 )
@@ -366,49 +383,59 @@ def match_image(image_id):
                             }
                         )
 
-                current_app.logger.info(
-                    f"✓ Vector search found {len(candidates)} candidates in <50ms"
+                    current_app.logger.info(
+                        f"✓ Vector search found {len(candidates)} candidates in <50ms"
+                    )
+            except Exception as e:
+                current_app.logger.warning(
+                    f"Vector search failed, falling back to linear search: {str(e)}"
                 )
-        except Exception as e:
-            current_app.logger.warning(
-                f"Vector search failed, falling back to linear search: {str(e)}"
-            )
-            candidates = []
+                candidates = []
 
-        # Fallback to legacy feature-based search if vector search failed or returned no results
-        if not candidates:
-            current_app.logger.info("Using legacy linear feature search...")
-            sole_images = SoleImage.query.all()
+            # Fallback to legacy feature-based search if vector search failed or returned no results
+            if not candidates:
+                current_app.logger.info("Using legacy linear feature search...")
+                sole_images = SoleImage.query.all()
 
-            for sole_image in sole_images:
-                # Quick feature-based similarity check
-                if uploaded_features and sole_image.feature_vector:
-                    try:
-                        sole_features = processor.deserialize_features(
-                            sole_image.feature_vector
-                        )
-                        similarity = processor.calculate_similarity(
-                            uploaded_features, sole_features
-                        )
-                        candidates.append(
-                            {"sole_image": sole_image, "quick_score": similarity}
-                        )
-                    except Exception as e:
-                        current_app.logger.warning(
-                            f"Feature comparison failed for {sole_image.id}: {str(e)}"
-                        )
-                        continue
+                for sole_image in sole_images:
+                    # Quick feature-based similarity check
+                    if uploaded_features and sole_image.feature_vector:
+                        try:
+                            sole_features = processor.deserialize_features(
+                                sole_image.feature_vector
+                            )
+                            similarity = processor.calculate_similarity(
+                                uploaded_features, sole_features
+                            )
+                            candidates.append(
+                                {"sole_image": sole_image, "quick_score": similarity}
+                            )
+                        except Exception as e:
+                            current_app.logger.warning(
+                                f"Feature comparison failed for {sole_image.id}: {str(e)}"
+                            )
+                            continue
 
-            # Sort candidates by quick score
-            candidates.sort(key=lambda x: x["quick_score"], reverse=True)
-            candidates = candidates[:top_k_candidates]  # Take top_k candidates
+                # Sort candidates by quick score
+                candidates.sort(key=lambda x: x["quick_score"], reverse=True)
+                candidates = candidates[:top_k_candidates]  # Take top_k candidates
 
-        top_candidates = candidates
+            top_candidates = candidates
+        # End of disabled vector search section
 
-        # Step 2: Now use compare_sole_images on top candidates for accurate matching
+        # Step 2: Now use compare_sole_images on ALL images for accurate matching
+        current_app.logger.info(f"⚡ Starting comprehensive comparison against {len(top_candidates)} images...")
+        
         matches = []
+        processed_count = 0
+        
         for candidate in top_candidates:
             sole_image = candidate["sole_image"]
+            processed_count += 1
+            
+            # Progress logging every 100 images
+            if processed_count % 100 == 0:
+                current_app.logger.info(f"  📊 Progress: {processed_count}/{len(top_candidates)} images compared ({100*processed_count/len(top_candidates):.1f}%)")
 
             # Use line_tracing comparison if available and images loaded
             if (
