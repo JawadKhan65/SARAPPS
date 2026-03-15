@@ -146,8 +146,7 @@ services:
     networks:
       - stip_network
     restart: unless-stopped
-    deploy:
-      replicas: 2  # Run 2 workers for better concurrency
+    # Scale workers using `docker compose up --scale worker=N`
 
   # Nginx Reverse Proxy
   nginx:

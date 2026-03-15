@@ -341,7 +341,7 @@ def run_crawler_job(crawler_id: str, admin_id: str, run_type: str = "manual"):
             if result.get("success"):
                 # Extract actual scrape result from nested structure
                 scrape_result = result.get("result", {})
-                
+
                 app.logger.info(
                     f"✅ Crawler job {job_id} completed successfully "
                     f"({duration:.1f}s, {scrape_result.get('total_unique', 0)} unique items)"
@@ -361,32 +361,30 @@ def run_crawler_job(crawler_id: str, admin_id: str, run_type: str = "manual"):
                 pipeline.hset(
                     f"crawler:{crawler_id}:job",
                     "items_scraped",
-                    scrape_result.get("total_scraped", 0),
+                    result.get("total_scraped", 0),
                 )
                 pipeline.hset(
                     f"crawler:{crawler_id}:job",
                     "items_unique",
-                    scrape_result.get("total_unique", 0),
+                    result.get("total_unique", 0),
                 )
                 pipeline.hset(
                     f"crawler:{crawler_id}:job",
                     "items_duplicate",
-                    scrape_result.get("total_duplicates", 0),
+                    result.get("total_duplicates", 0),
                 )
                 pipeline.expire(f"crawler:{crawler_id}:job", 604800)  # 7 days
                 pipeline.execute()
 
                 # Update database Crawler model with final counts
                 try:
-                    crawler.items_scraped += scrape_result.get("total_scraped", 0)
-                    crawler.unique_images_added += scrape_result.get("total_unique", 0)
-                    crawler.duplicate_count += scrape_result.get("total_duplicates", 0)
+                    crawler.items_scraped = result.get("total_scraped", 0)
+                    crawler.unique_images_added = result.get("total_unique", 0)
                     crawler.last_run_at = datetime.utcnow()
                     db.session.commit()
                     app.logger.info(
-                        f"✅ Updated crawler stats: {scrape_result.get('total_scraped', 0)} total, "
-                        f"{scrape_result.get('total_unique', 0)} unique, "
-                        f"{scrape_result.get('total_duplicates', 0)} duplicates"
+                        f"✅ Updated crawler stats: {crawler.items_scraped} total, "
+                        f"{crawler.unique_images_added} unique"
                     )
                 except Exception as e:
                     app.logger.warning(f"⚠️  Failed to update crawler stats: {e}")
@@ -396,10 +394,10 @@ def run_crawler_job(crawler_id: str, admin_id: str, run_type: str = "manual"):
                     redis_conn,
                     crawler_id,
                     {
-                        "current": scrape_result.get("total_scraped", 0),
-                        "total": scrape_result.get("total_scraped", 0),
+                        "current": result.get("total_scraped", 0),
+                        "total": result.get("total_scraped", 0),
                         "percentage": 100,
-                        "message": f"Completed: {scrape_result.get('total_unique', 0)} unique items",
+                        "message": f"Completed: {result.get('total_unique', 0)} unique items",
                     },
                 )
 
