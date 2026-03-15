@@ -7,7 +7,7 @@ services:
     container_name: stip_postgres
     environment:
       POSTGRES_USER: stip_user
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-stip_password_change_me}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_DB: stip_production
     ports:
       - "5432:5432"
@@ -49,9 +49,9 @@ services:
     environment:
       FLASK_APP: app.py
       FLASK_ENV: ${FLASK_ENV:-production}
-      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production}
-      DATABASE_URL: postgresql://stip_user:${DB_PASSWORD:-stip_password_change_me}@postgres:5432/stip_production
+      SECRET_KEY: ${SECRET_KEY}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      DATABASE_URL: postgresql://stip_user:${DB_PASSWORD}@postgres:5432/stip_production
       REDIS_URL: redis://redis:6379/0
       MAIL_SERVER: ${MAIL_SERVER:-smtp.gmail.com}
       MAIL_PORT: ${MAIL_PORT:-587}
@@ -134,9 +134,9 @@ services:
     command: python worker.py
     environment:
       FLASK_ENV: ${FLASK_ENV:-production}
-      DATABASE_URL: ${DATABASE_URL:-postgresql://stip_user:stip_password_change_me@postgres:5432/stip_production}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change_this_secret_key_in_production}
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
     depends_on:
       - postgres
       - redis

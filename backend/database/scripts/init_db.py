@@ -40,59 +40,8 @@ def init_database():
             return
 
         print("\n📋 Step 3: Creating default admin user...")
-        try:
-            # Import here to avoid circular imports
-            from werkzeug.security import generate_password_hash
-            from core.models import AdminUser
-
-            # Check if admin exists
-            admin = AdminUser.query.filter_by(email="jawadkhan8464@gmail.com").first()
-            if not admin:
-                admin = AdminUser(
-                    username="admin",
-                    email="jawadkhan8464@gmail.com",
-                    password_hash=generate_password_hash("admin123"),
-                    is_active=True,
-                )
-                db.session.add(admin)
-                db.session.commit()
-                print("✅ Default admin user created")
-                print("   Username: admin")
-                print("   Email: jawadkhan8464@gmail.com")
-                print("   Password: admin123")
-            else:
-                print("✅ Admin user already exists")
-        except Exception as e:
-            print(f"⚠️  Error creating admin user: {e}")
-            db.session.rollback()
-
-        try:
-            # Import here to avoid circular imports
-            from werkzeug.security import generate_password_hash
-            from core.models import AdminUser
-
-            # Check if admin exists
-            admin = AdminUser.query.filter_by(
-                email="mikebravens26april@gmail.com"
-            ).first()
-            if not admin:
-                admin = AdminUser(
-                    username="admin",
-                    email="mikebravens26april@gmail.com",
-                    password_hash=generate_password_hash("admin123"),
-                    is_active=True,
-                )
-                db.session.add(admin)
-                db.session.commit()
-                print("✅ Default admin user created")
-                print("   Username: admin")
-                print("   Email: mikebravens26april@gmail.com")
-                print("   Password: admin123")
-            else:
-                print("✅ Admin user already exists")
-        except Exception as e:
-            print(f"⚠️  Error creating admin user: {e}")
-            db.session.rollback()
+        print("⚠️  Admin users must be created using admin_creation.py script")
+        print("   with ADMIN_USERS environment variable.")
 
         print("\n📋 Step 4: Verifying tables...")
         try:

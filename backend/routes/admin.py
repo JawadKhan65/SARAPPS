@@ -787,7 +787,6 @@ def get_system_config():
         {
             "smtp_server": config.smtp_server,
             "smtp_port": config.smtp_port,
-            "smtp_username": config.smtp_username,
             "smtp_security": config.smtp_security,
             "similarity_threshold": config.similarity_threshold,
             "batch_size": config.batch_size,
@@ -1605,7 +1604,6 @@ def get_settings():
                 "password_min_length": config.password_min_length,
                 "smtp_server": config.smtp_server,
                 "smtp_port": config.smtp_port,
-                "smtp_username": config.smtp_username,
                 "smtp_sender_email": config.smtp_sender_email,
                 "smtp_security": config.smtp_security,
                 "db_pool_size": config.db_pool_size,

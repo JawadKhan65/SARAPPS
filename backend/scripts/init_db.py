@@ -263,15 +263,23 @@ def create_indexes():
 
 
 def create_default_admin():
-    """Create default admin users."""
+    """Create default admin users from environment variable."""
     logger.info("Creating default admin users...")
 
-    default_admin_emails = [
-        "jawadkhan10322@gmail.com",
-        "mikebravens26april@gmail.com",
-        "admin@sarapps.com",
-        "search.and.rescue.apps@gmail.com"
-    ]
+    # Get admins from environment variable or skip
+    admin_env = os.getenv('ADMIN_USERS', '')
+    if not admin_env:
+        logger.info("⚠️  ADMIN_USERS environment variable not set.")
+        logger.info("   Skipping admin creation. Use admin_creation.py script instead.")
+        return None, None
+    
+    default_admin_emails = []
+    for admin_str in admin_env.split(','):
+        parts = admin_str.strip().split(':')
+        if len(parts) >= 1:
+            # Extract email from username:email:password format or just email
+            email = parts[1] if len(parts) > 1 else parts[0]
+            default_admin_emails.append(email)
 
     created = []
     skipped = []

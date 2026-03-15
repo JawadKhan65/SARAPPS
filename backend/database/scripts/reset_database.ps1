@@ -120,9 +120,9 @@ Write-Host "══════════════════════�
 Write-Host "🎉 Database reset completed successfully!" -ForegroundColor Green
 Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "Default admin credentials:" -ForegroundColor Yellow
-Write-Host "  Email: admin@shoeidentifier.local" -ForegroundColor White
-Write-Host "  Password: admin123" -ForegroundColor White
+Write-Host "Admin credentials:" -ForegroundColor Yellow
+Write-Host "  Set credentials via ADMIN_USERS environment variable" -ForegroundColor White
+Write-Host "  Use admin_creation.py script to create admins" -ForegroundColor White
 Write-Host ""
 Write-Host "You can now start the Flask backend:" -ForegroundColor Cyan
 Write-Host "  python app.py" -ForegroundColor White

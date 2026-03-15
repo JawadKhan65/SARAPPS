@@ -1,4 +1,5 @@
 import sys
+import os
 from werkzeug.security import generate_password_hash
 from core.extensions import db
 from core.models import AdminUser
@@ -8,11 +9,23 @@ import uuid
 def create_admins():
     app = create_app()
     with app.app_context():
-        admins = [
-            {'username': 'mike_april', 'email': 'mikebravens26april@gmail.com', 'password': 'admin123'},
-            {'username': 'search_and_rescue_apps', 'email': 'search.and.rescue.apps@gmail.com', 'password': 'admin123'},
-            {'username': 'sarapps_admin', 'email': 'admin@sarapps.com', 'password': 'admin123'}
-        ]
+        # Get admins from environment or use empty list
+        # Format: ADMIN_USERS=username1:email1:password1,username2:email2:password2
+        admin_env = os.getenv('ADMIN_USERS', '')
+        if not admin_env:
+            print('⚠️  ADMIN_USERS environment variable not set. Skipping admin creation.')
+            print('   Set ADMIN_USERS=username:email:password to create admins.')
+            return
+        
+        admins = []
+        for admin_str in admin_env.split(','):
+            parts = admin_str.strip().split(':')
+            if len(parts) == 3:
+                admins.append({
+                    'username': parts[0],
+                    'email': parts[1],
+                    'password': parts[2]
+                })
         for admin_data in admins:
             try:
                 existing = AdminUser.query.filter_by(email=admin_data['email']).first()
