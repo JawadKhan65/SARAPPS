@@ -18,6 +18,12 @@ pnpm-debug.log*
 .env.test.local
 .env.production.local
 .next-env.d.ts.local
+secrets_*.txt
+firebase-admin-key.json
+
+# Large database dumps (load via Docker/separate process)
+sql_data/*.sql
+sql_data/*.sql.gz
 
 # Next/Vercel / hosting
 .vercel/
